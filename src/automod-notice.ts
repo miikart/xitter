@@ -7,7 +7,7 @@ export const NOTICE_SCRIPT = `(function(){
 		var m=(document.cookie.match(/(?:^|;\\s*)night_mode=(\\d)/)||[])[1];if(m==="0")return"light";if(m==="1")return"dim";if(m==="2")return"dark";return matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"
 	}
 	var COLORS={light:["#fff","#0f1419","#536471","#eff3f4"],dim:["#15202b","#f7f9f9","#8b98a5","#38444d"],dark:["#000","#e7e9ea","#71767b","#2f3336"]};
-	var TITLE={strike:"You got a strike",warning:"Your post wasn't published",message:"A message from staff"};
+	var TITLE={strike:"Your post violated the rules",warning:"Your post wasn't published",message:"A message from staff"};
 	function show(m){
 		showing=true;
 		var c=theme();if(typeof c==="string")c=COLORS[c];var back=document.createElement("div"),card=document.createElement("div"),h=document.createElement("h2"),p=document.createElement("p"),row=document.createElement("div"),more=document.createElement("a"),ok=document.createElement("button");

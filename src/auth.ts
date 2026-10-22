@@ -100,7 +100,7 @@ export async function login(screenName: string, password: string): Promise<{ tok
 	await expireSanctions();
 	// accounts with a second factor sign in through the dialog's code step (startSession)
 	const [u] = await sql`select id, password_hash from users where lower(screen_name) = lower(${screenName}) and not totp_enabled and instance is null
-		and (status <> 'suspended' or deactivated_at > now() - interval '30 days')`;
+		and (status <> 'suspended' or deactivated_at is null or deactivated_at > now() - interval '30 days')`;
 	// verify against a dummy hash when the user is unknown so timing does not reveal it
 	const ok = await Bun.password.verify(password, u?.password_hash ?? DUMMY_HASH).catch(() => false);
 	if (!u || !ok) return undefined;
@@ -117,7 +117,7 @@ export async function login(screenName: string, password: string): Promise<{ tok
 			const back = await tx`update users set status = 'active', deactivated_at = null
 				where id = ${u.id}::bigint and deactivated_at > now() - interval '30 days' returning id`;
 			if (!back.length) return false;
-		} else if (current.status === "suspended") return false;
+		}
 		await tx`insert into sessions (token, user_id, csrf) values (${token}, ${u.id}::bigint, ${csrf})`;
 		await tx`update users set last_seen_at = now() where id = ${u.id}::bigint`;
 		return true;
@@ -132,7 +132,7 @@ export type Session = { token: string; csrf: string; userId: string };
 export async function startSession(userId: string, executor: typeof sql = sql): Promise<Session> {
 	const token = randomHex(20);
 	const csrf = randomHex(32);
-	const made = await executor`insert into sessions (token, user_id, csrf) select ${token}, id, ${csrf} from users where id = ${userId}::bigint and status <> 'suspended' returning token`;
+	const made = await executor`insert into sessions (token, user_id, csrf) select ${token}, id, ${csrf} from users where id = ${userId}::bigint and (status <> 'suspended' or deactivated_at is null) returning token`;
 	if (!made.length) throw new Error("account suspended");
 	await executor`update users set last_seen_at = now() where id = ${userId}::bigint`;
 	return { token, csrf, userId };
@@ -171,7 +171,7 @@ async function loadViewer(req: Request): Promise<Viewer | undefined> {
 	if (!token) return undefined;
 	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token, s.superadmin
 		from sessions s join users u on u.id = s.user_id
-		where s.token = ${token} and u.status <> 'suspended' and (s.expires_at is null or s.expires_at > now())
+		where s.token = ${token} and (u.status <> 'suspended' or u.deactivated_at is null) and (s.expires_at is null or s.expires_at > now())
 			and (u.instance is null or (s.superadmin and s.expires_at is not null))`;
 	// for the admin panel's session list; written at most once a minute
 	if (row)

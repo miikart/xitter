@@ -18,7 +18,9 @@ export async function expireSanctions() {
 export async function shutOut(...userIds: string[]) {
 	if (!userIds.length) return;
 	const ids = sql.array(userIds, "INT8");
-	await sql`delete from sessions where user_id = any(${ids})`;
+	// an account staff suspended stays signed in, to be told so (server.ts); a
+	// deactivated one is signed out
+	await sql`delete from sessions where user_id = any(${ids}) and user_id in (select id from users where status <> 'suspended' or deactivated_at is not null)`;
 	await sql`delete from login_challenges where user_id = any(${ids})`;
 	await sql`delete from push_subscriptions where user_id = any(${ids})`;
 	await sql`update invites set revoked = true where created_by = any(${ids}) and not revoked and uses < max_uses`;
@@ -78,20 +80,21 @@ export async function automodStrike(userId: string, hit: HateHit, where: keyof t
 	if (!settings().automod.enabled) return undefined;
 	const [recent] = await sql`select 1 from audit_log where target = ${userId} and action in ('automod_strike', 'automod_second_chance') and created_at > now() - interval '2 minutes'`;
 	if (recent) return undefined;
-	const what = `${PLACE[where] ?? PLACE.other} contained ${WHAT[hit.category] ?? "content"} this instance doesn't allow`;
+	const place = PLACE[where] ?? PLACE.other;
+	// no counts or ladder in what the person reads: only staff see those
+	const what = `${place[0].toUpperCase()}${place.slice(1)} contained ${WHAT[hit.category] ?? "content"} that isn't allowed here, so it wasn't published.`;
 	const detail = { where, category: hit.category, term: hit.term, sample: [...sample].slice(0, 300).join("") };
 	const left = await secondChancesLeft(userId);
 	const message = newId();
 	if (left > 0) {
-		const per = settings().automod.second_chances;
 		const after = left - 1;
-		const body = `${what[0].toUpperCase()}${what.slice(1)}, so it wasn't published. This time it doesn't count as a strike: you get ${per} second chances a week, and you have ${after === 0 ? "none" : after} left. ${after === 0 ? "From now until the week is up, the next one is a strike, and strikes lead to suspension." : "Once they're used up, each one is a strike, and strikes lead to suspension."}`;
+		const body = `${what} Accounts that keep breaking the rules can be suspended.`;
 		await sql`insert into staff_messages (id, user_id, actor_id, kind, body) values (${message}::bigint, ${userId}::bigint, null, 'warning', ${body})`;
 		await sql`insert into audit_log (id, actor_id, action, target, detail) values (${newId()}::bigint, null, 'automod_second_chance', ${userId},
 			${JSON.stringify({ message, left: after, ...detail })}::text::jsonb)`;
 		return { strikes: await activeStrikes(userId), outcome: "second_chance" };
 	}
-	const body = `Automatic strike: ${what}. It wasn't published, and you have no second chances left this week. Repeated strikes lead to suspension. If this was a mistake, you can appeal.`;
+	const body = `${what} Accounts that keep breaking the rules are suspended. If you think this was a mistake, you can appeal.`;
 	await sql`insert into staff_messages (id, user_id, actor_id, kind, body) values (${message}::bigint, ${userId}::bigint, null, 'strike', ${body})`;
 	await sql`insert into audit_log (id, actor_id, action, target, detail) values (${newId()}::bigint, null, 'automod_strike', ${userId},
 		${JSON.stringify({ message, ...detail })}::text::jsonb)`;

@@ -13,7 +13,7 @@ import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { settings } from "./settings";
 
-const KIND = { message: "Message", warning: "Warning", strike: "Strike" } as Record<string, string>;
+const KIND = { message: "Message", warning: "Notice", strike: "Rule violation" } as Record<string, string>;
 const OUTCOME = { open: "Waiting for staff", accepted: "Accepted", rejected: "Turned down" } as Record<string, string>;
 const date = (d: Date) => new Date(d).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }) + " UTC";
 

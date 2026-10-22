@@ -61,11 +61,11 @@ try {
 	check((await tweet(grace, "kys")).data.errors?.[0]?.code === 186, "an abusive post is refused");
 	check((await strikes(graceId)) === 0, "but the first one is a second chance, not a strike");
 	let notes = await unread();
-	check(notes[0]?.kind === "warning" && notes[0].body.includes("you have 1 left"), "a notice says so and counts what's left");
+	check(notes[0]?.kind === "warning" && !/\d+ left|second chance/.test(notes[0].body), "a notice says nothing of counts or chances");
 	await ageStrikes(graceId);
 	await tweet(grace, "kys");
 	notes = await unread();
-	check((await strikes(graceId)) === 0 && notes[0].body.includes("you have none left"), "the second one uses the last chance");
+	check((await strikes(graceId)) === 0, "the second one uses the last chance");
 	await ageStrikes(graceId);
 	await tweet(grace, "kys");
 	check((await strikes(graceId)) === 1, "with none left it's a strike");
@@ -103,8 +103,9 @@ try {
 	let s = await standing(userId);
 	check(s.status === "suspended" && s.status_until && new Date(s.status_until).getTime() - Date.now() > 23 * 3600_000, "second strike suspends for a day");
 	check(s.status_restore === "active", "and remembers the earlier standing");
-	check((await tweet(user, "hello")).status === 401, "the old session can't post");
-	check(!(await session(userName)).ok, "a suspended account can't sign in");
+	const blocked = await tweet(user, "hello");
+	check(blocked.status === 403 && blocked.data.errors?.[0]?.code === 64, "the old session stays signed in but can't post (code 64)");
+	check((await session(userName)).ok, "a suspended account can still sign in, to be told so");
 	check((await sql`select 1 from audit_log where action = 'escalate' and target = ${userId}`).length >= 1, "escalation in the audit log");
 
 	const due = await sql`insert into scheduled_posts (id, user_id, kind, execute_at, request) values (${Date.now()}::bigint, ${userId}::bigint, 'scheduled', now() - interval '1 minute', ${JSON.stringify({ status: "scheduled while suspended" })}::text::jsonb) returning id`;
@@ -181,8 +182,8 @@ try {
 	check((await sql`select revoked from invites where code = ${invite}`)[0].revoked, "the suspended account's unused invites are revoked");
 	check((await me()).status === 401, "an API token issued before the suspension stops working");
 	check((await fetch(`${origin}/xchat/ws?token=${chatToken}`)).status === 403, "and so does a chat token");
-	check((await p.gql("CreateTweet", { tweet_text: "still here?" })).status === 401, "and the old session");
-	check((await sql`select 1 from sessions where user_id = ${pId}::bigint`).length === 0, "every session is gone");
+	check((await p.gql("CreateTweet", { tweet_text: "still here?" })).data.errors?.[0]?.code === 64, "and the old session is told it is suspended (code 64)");
+	check((await sql`select 1 from sessions where user_id = ${pId}::bigint`).length > 0, "its sessions stay, to show the suspension");
 	const { checkSignup, SignupError } = await import("../src/invites");
 	const signup = async (email: string, ip: string | null) => {
 		try {
