@@ -15,9 +15,18 @@
 	.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 	nav { border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; }
 	nav .logo { width: 128px; margin: 4px 8px 20px; display: block; }
-	nav button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
+	nav button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 7px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 15px; text-align: left; cursor: pointer; }
 	nav button:hover { background: var(--panel); }
 	nav button.on { font-weight: 700; }
+	/* 28 pages didn't fit a laptop screen: they sit in groups, one open at a time */
+	nav .ghead { margin-top: 6px; color: var(--dim); font-size: 14px; font-weight: 600; }
+	nav .ghead > span:first-child { flex: 1; }
+	nav .ghead .icon { transition: rotate .15s; }
+	nav .group.open .ghead { color: var(--text); }
+	nav .group.open .ghead .icon { rotate: 180deg; }
+	nav .gitems { display: none; }
+	nav .group.open .gitems, nav .group.solo .gitems { display: block; }
+	nav .end { margin-top: 12px; }
 	nav .who { margin-top: 24px; padding: 0 12px; color: var(--dim); font-size: 13px; }
 	main { padding: 20px 24px 64px; max-width: 1100px; min-width: 0; }
 	h1 { margin: 0 0 16px; font-size: 22px; }
@@ -37,7 +46,9 @@
 	.card span { color: var(--dim); font-size: 13px; }
 	.table { width: 100%; border-collapse: collapse; }
 	.table th { text-align: left; color: var(--dim); font-weight: 400; font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-	.table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+	/* a post that's one long word ("aaaa…") stretched the table and pushed every
+	   row's buttons off the side */
+	.table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; overflow-wrap: anywhere; }
 	.table tr.click { cursor: pointer; }
 	.table tr.click:hover td { background: var(--panel); }
 	.scroll { overflow-x: auto; }
@@ -60,6 +71,9 @@
 	.field { display: grid; gap: 4px; margin-bottom: 10px; }
 	.field label { color: var(--dim); font-size: 13px; }
 	.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+	.ann-buttons { display: grid; gap: 8px; }
+	.ann-row [data-label] { flex: 1 1 140px; min-width: 0; }
+	.ann-row [data-url] { flex: 3 1 220px; min-width: 0; }
 	label.row { flex-wrap: nowrap; align-items: flex-start; }
 	label.row input { margin-top: 3px; flex: none; }
 	.flags { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -90,7 +104,22 @@
 		nav .logo { display: none; }
 		nav button { width: auto; padding: 8px 10px; font-size: 14px; }
 		nav .who { display: none; }
+		/* the groups make one row of chips, the open one's pages a row below */
+		nav .group, nav .group.solo .gitems, nav .end { display: contents; }
+		nav .ghead { margin-top: 0; }
+		nav .ghead .icon { display: none; }
+		nav .group.open .ghead { font-weight: 700; background: var(--panel); }
+		nav .gitems { order: 1; flex-basis: 100%; }
+		nav .group.open .gitems { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
 		main { padding: 16px; }
+		/* a table's last columns (the action buttons) fell off the side of a
+		   phone, behind a sideways scroll nobody noticed: each row stacks instead */
+		.table, .table tbody { display: block; }
+		.table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+		.table tr:has(> th), .table [hidden] { display: none; }
+		.table td { padding: 0; border-bottom: 0; }
+		.table td:first-child { flex-basis: 100%; }
+		.table .row { flex-wrap: wrap !important; }
 	}
 </style>
 </head>
@@ -105,6 +134,7 @@
 "use strict";
 const csrf = (document.cookie.match(/(?:^|; )ct0=([^;]+)/) || [])[1] || "";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const annRow = (b, dis) => '<div class="row ann-row"><input data-label maxlength="30" placeholder="Label, like More" aria-label="Button label" value="' + esc(b.label) + '"' + dis + '><input data-url type="url" inputmode="url" placeholder="https://" aria-label="Button link" value="' + esc(b.url) + '"' + dis + '>' + (dis ? "" : '<button class="btn" type="button" data-remove>Remove</button>') + "</div>";
 const $ = (sel, root = document) => root.querySelector(sel);
 const RANK = { support: 1, moderator: 2, admin: 3 };
 let me = null;
@@ -200,6 +230,19 @@ const PAGES = {
 	audit: { icon: "history", title: "Audit log" },
 };
 
+const GROUPS = [
+	[null, ["overview"]],
+	["Moderation", ["reports", "appeals", "automod", "posts", "articles", "media"]],
+	["People", ["users", "orgs", "invites", "badges"]],
+	["Content", ["stickers", "hashflags", "topics", "cards"]],
+	["Instance", ["settings", "switches", "email", "apps", "oauth", "federation", "hosting"]],
+	["Staff and system", ["permissions", "security", "audit", "errors", "backups", "client"]],
+];
+function openGroup(g, on) {
+	g.classList.toggle("open", on);
+	g.querySelector(".ghead")?.setAttribute("aria-expanded", String(on));
+}
+
 function go(hash) { location.hash = hash; }
 window.addEventListener("hashchange", route);
 
@@ -209,6 +252,8 @@ async function route() {
 	const [page, arg] = location.hash.slice(1).split("/");
 	const name = PAGES[page] ? page : page === "user" ? "users" : "overview";
 	document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.page === name));
+	const cur = $('nav [data-page="' + name + '"]');
+	document.querySelectorAll("nav .group").forEach((g) => openGroup(g, g.contains(cur)));
 	const main = $("#main");
 	main.innerHTML = '<div class="empty">Loading…</div>';
 	try {
@@ -1098,9 +1143,16 @@ const RENDER = {
 			[["none", "No badge"], ["blue", "Blue check"], ["business", "Gold check (organisations)"], ["government", "Grey check (government organisations and officials)"]]
 				.map(([k, l]) => '<div class="field"><label>' + l + '</label><input type="number" min="1" data-postlen="' + k + '" value="' + esc(s.post_limits[k]) + '"' + dis + "></div>").join("") +
 			(admin ? '<button class="btn primary" id="savePostLen">Save</button>' : "") + "</div>" +
+			'<div class="box"><h2>Daily caps</h2><p class="dim small">The most posts and replies one account may make in any 24 hours. Staff have no caps.</p>' +
+			'<label class="row" style="margin:6px 0"><input type="checkbox" id="capsOn"' + (s.daily_caps.enabled ? " checked" : "") + dis + "> Cap posts and replies per day</label>" +
+			'<div class="field"><label>Posts a day</label><input type="number" min="1" id="capPosts" value="' + esc(s.daily_caps.posts) + '"' + dis + "></div>" +
+			'<div class="field"><label>Replies a day</label><input type="number" min="1" id="capReplies" value="' + esc(s.daily_caps.replies) + '"' + dis + "></div>" +
+			(admin ? '<button class="btn primary" id="saveCaps">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Announcement</h2><p class="dim small">A banner above everyone\'s timeline until they close it. Saving new text shows it again to everyone.</p>' +
 			'<div class="field"><label>Text (empty removes the banner)</label><textarea id="annText" maxlength="500"' + dis + ">" + esc(s.announcement.text) + "</textarea></div>" +
-			'<div class="field"><label>Link (optional)</label><input id="annLink" value="' + esc(s.announcement.link) + '"' + dis + "></div>" +
+			'<div class="field"><label>Buttons (up to 4, each opens its link in a new tab)</label><div id="annButtons" class="ann-buttons">' +
+			((s.announcement.buttons && s.announcement.buttons.length) ? s.announcement.buttons : s.announcement.link ? [{ label: "More", url: s.announcement.link }] : []).map((b) => annRow(b, dis)).join("") +
+			"</div>" + (admin ? '<button class="btn" id="addAnnBtn" type="button" style="margin-top:8px">Add button</button>' : "") + "</div>" +
 			(admin ? '<button class="btn primary" id="saveAnn">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Rules</h2><p class="dim small">Shown at <a href="/rules" target="_blank">/rules</a> and linked from sign-up. A blank line starts a new paragraph.</p>' +
 			'<textarea id="rules" style="min-height:160px"' + dis + ">" + esc(s.rules) + "</textarea>" +
@@ -1184,7 +1236,17 @@ const RENDER = {
 			main.querySelectorAll("[data-postlen]").forEach((i) => r[i.dataset.postlen] = i.value);
 			save({ post_limits: r }, "Post lengths saved");
 		};
-		$("#saveAnn").onclick = () => save({ announcement: { text: $("#annText").value, link: $("#annLink").value } }, "Announcement saved");
+		if ($("#saveCaps")) $("#saveCaps").onclick = () => save({ daily_caps: { enabled: $("#capsOn").checked, posts: $("#capPosts").value, replies: $("#capReplies").value } }, "Daily caps saved");
+		const annList = $("#annButtons");
+		const annFull = () => { if ($("#addAnnBtn")) $("#addAnnBtn").disabled = annList.children.length >= 4; };
+		annFull();
+		if ($("#addAnnBtn")) $("#addAnnBtn").onclick = () => {
+			annList.insertAdjacentHTML("beforeend", annRow({ label: annList.children.length ? "" : "More", url: "" }, ""));
+			annList.lastElementChild.querySelector("input").focus();
+			annFull();
+		};
+		annList.onclick = (e) => { const x = e.target.closest("[data-remove]"); if (x) { x.closest(".ann-row").remove(); annFull(); } };
+		$("#saveAnn").onclick = () => save({ announcement: { text: $("#annText").value, buttons: [...annList.querySelectorAll(".ann-row")].map((r) => ({ label: r.querySelector("[data-label]").value, url: r.querySelector("[data-url]").value })) } }, "Announcement saved");
 		$("#saveRules").onclick = () => save({ rules: $("#rules").value }, "Rules saved");
 		const listOf = (id) => $(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
 		// accounts that already carry a blocked name, then suspend them in one go
@@ -1294,6 +1356,12 @@ async function refreshCounts() {
 		b.querySelector(".count")?.remove();
 		if (n) b.insertAdjacentHTML("beforeend", '<span class="count">' + n + "</span>");
 	}
+	// a shut group still shows what waits inside it
+	document.querySelectorAll("nav .ghead").forEach((h) => {
+		h.querySelector(".count")?.remove();
+		const n = [...h.parentNode.querySelectorAll(".gitems .count")].reduce((sum, c) => sum + Number(c.textContent), 0);
+		if (n) h.firstChild.insertAdjacentHTML("afterend", '<span class="count">' + n + "</span>");
+	});
 }
 
 // which instances' accounts the Users and Organisations lists show (sessionStorage "userHome")
@@ -1476,11 +1544,23 @@ async function renderUser(main, id) {
 		$("#main").innerHTML = '<div class="empty">' + esc(e.message) + ' <a href="/home">Back to {{instance}}</a></div>';
 		return;
 	}
-	$("#nav").insertAdjacentHTML("beforeend", Object.entries(PAGES).filter(([, p]) => !p.needs || can(p.needs)).map(([k, p]) => '<button data-page="' + k + '"><span class="icon">' + p.icon + "</span>" + esc(p.title) + "</button>").join("") +
+	const item = (k) => '<button data-page="' + k + '"><span class="icon">' + PAGES[k].icon + "</span>" + esc(PAGES[k].title) + "</button>";
+	$("#nav").insertAdjacentHTML("beforeend", GROUPS.map(([title, keys]) => {
+		const shown = keys.filter((k) => !PAGES[k].needs || can(PAGES[k].needs));
+		if (!shown.length) return "";
+		return '<div class="group' + (title ? "" : " solo") + '">' +
+			(title ? '<button class="ghead" aria-expanded="false"><span>' + esc(title) + '</span><span class="icon">expand_more</span></button>' : "") +
+			'<div class="gitems">' + shown.map(item).join("") + "</div></div>";
+	}).join("") +
+		'<div class="end">' +
 		(me.superadmin_home ? '<button onclick="location.href=\'/federation/superadmin\'"><span class="icon">shield_person</span>Superadmin</button>' : "") +
 		'<button onclick="location.href=\'/home\'"><span class="icon">arrow_back</span>Back to {{instance}}</button>' +
-		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div>");
+		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div></div>");
 	document.querySelectorAll("nav [data-page]").forEach((b) => b.onclick = () => go(b.dataset.page));
+	document.querySelectorAll("nav .ghead").forEach((h) => h.onclick = () => {
+		const g = h.parentNode, on = !g.classList.contains("open");
+		document.querySelectorAll("nav .group").forEach((x) => openGroup(x, on && x === g));
+	});
 	refreshCounts();
 	route();
 })();

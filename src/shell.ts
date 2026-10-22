@@ -15,11 +15,12 @@ import { BADGES_SCRIPT } from "./badges";
 import { DECOR_SCRIPT } from "./decor";
 import { DECORATIONS_SCRIPT } from "./decorations";
 import { THEME_SCRIPT } from "./themes/client";
-import { bootAccentCss, bootCss, fontLinks, pageChromeCss, type BackgroundPaint } from "./themes/css";
+import { bootAccentCss, bootCss, fontLinks, pageChromeCss, steamMotion, type BackgroundPaint } from "./themes/css";
 import { DEFAULT_ACCENT, swatches, themeColorOf, type Accent } from "./themes/presets";
-import { clientLook, type Look } from "./themes/validate";
+import { clientLook, themeForClient, type Look } from "./themes/validate";
 import { NOTICE_SCRIPT } from "./automod-notice";
 import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-picker";
+import { PRONOUNS_CSS, PRONOUNS_SCRIPT, pronounsData } from "./pronouns";
 import { PUBLIC_ORIGIN } from "./config";
 import { legacyUser } from "./model";
 import { patchText } from "./patch";
@@ -153,6 +154,8 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_edit_tweet_enabled: { value: true },
 	responsive_web_edit_tweet_composition_enabled: { value: true },
 	responsive_web_edit_tweet_perspective_enabled: { value: true },
+	responsive_web_grok_tweet_translation: { value: false },
+	responsive_web_translation_feedback_enabled: { value: false },
 });
 // every build's, then the serving build's own
 const overrideSwitches = () => {
@@ -296,6 +299,35 @@ const inline = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
 let runtimePatched: { sha: string; text: string } | undefined;
 
+// Xitter's own scripts are the same on every page (one set signed in, one
+// signed out), so they come as a file the browser keeps instead of 130 KB
+// inside every page. Its address carries a hash of it (bootScript).
+const BOOT_SCRIPTS = (signedIn: boolean) =>
+	`${signedIn ? ERROR_SCRIPT : ""}
+${TIDY_SCRIPT}
+${FRESH_SCRIPT}
+${FORGOT_SCRIPT}
+${signedIn ? "" : PASSKEY_SCRIPT}
+${PRONOUNS_SCRIPT}
+${FLAG_PICKER_SCRIPT}
+${signedIn ? STICKER_PICKER_SCRIPT : ""}
+${signedIn ? CONVERSATION_CARD_SCRIPT : ""}
+${POST_CONTEXT_SCRIPT}
+${BADGES_SCRIPT}
+${signedIn ? THEME_SCRIPT : ""}
+${signedIn ? DECOR_SCRIPT : ""}
+${DECORATIONS_SCRIPT}
+${signedIn ? NOTICE_SCRIPT : ""}
+${PWA_SCRIPT}`;
+let boot: { body: Buffer; path: string }[] | undefined;
+const boots = () =>
+	(boot ??= [false, true].map((signedIn) => {
+		const body = Buffer.from(BOOT_SCRIPTS(signedIn));
+		return { body, path: `/i/xitter/boot-${Bun.hash(body).toString(36)}.js` };
+	}));
+const bootFor = (signedIn: boolean) => boots()[signedIn ? 1 : 0];
+export const bootScript = (path: string): Buffer | undefined => boots().find((b) => b.path === path)?.body;
+
 // With no user the client boots signed out, for the sign-in dialog.
 // `multi`: other accounts are signed in too (auth_multi), so the account menu
 // asks for them.
@@ -303,6 +335,7 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 	const theme = look?.kind === "painted" ? look.theme : null;
 	const brand = originalBrand(!!user);
 	const original = !!brand;
+	const clientTheme = theme ? themeForClient(theme) : null;
 	const loaded = loadBuild();
 	if (!loaded) return undefined;
 	const { build, runtime } = loaded;
@@ -323,26 +356,14 @@ html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 @media (display-mode:standalone){body{overscroll-behavior-y:none}}${original ? "" : LOGO_CSS}
 ${hideCss()}
 ${FLAG_PICKER_CSS}
+${PRONOUNS_CSS}
 ${STICKER_PICKER_CSS}${bootAccentCss(accent)}${theme ? bootCss(theme, paint) : ""}
-${CONVERSATION_CARD_CSS}</style>
+${CONVERSATION_CARD_CSS}
+[data-testid="sidebarColumn"] div:has(> [data-testid="emptyState"]),[data-testid="sidebarColumn"] div:has(> div > aside) ~ div:empty{display:none}</style>
 </head><body><div id="react-root" style="height:100%;display:flex;"></div>
 <script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags, accent))};window.__META_DATA__=${inline(meta)};</script>
-<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), tidy: tidyData(links), theme, look: clientLook(look, accent), accent: clientLook(look, accent).accent, themeColor: themeColorOf(accent), themePresets: swatches(), pageChrome: pageChromeCss(paint), ...(user && csrf ? { csrf } : {}) })};
-${user ? ERROR_SCRIPT : ""}
-${TIDY_SCRIPT}
-${FRESH_SCRIPT}
-${FORGOT_SCRIPT}
-${user ? "" : PASSKEY_SCRIPT}
-${FLAG_PICKER_SCRIPT}
-${user ? STICKER_PICKER_SCRIPT : ""}
-${user ? CONVERSATION_CARD_SCRIPT : ""}
-${POST_CONTEXT_SCRIPT}
-${BADGES_SCRIPT}
-${user ? THEME_SCRIPT : ""}
-${user ? DECOR_SCRIPT : ""}
-${DECORATIONS_SCRIPT}
-${user ? NOTICE_SCRIPT : ""}
-${PWA_SCRIPT}</script>
+<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), tidy: tidyData(links), theme: clientTheme, look: clientLook(look, accent), accent: clientLook(look, accent).accent, themeColor: themeColorOf(accent), themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
+<script src="${bootFor(!!user).path}"></script>
 <script id="nonce-csp"></script>
 <script>${runtimePatched.text}</script>
 ${scripts}

@@ -10,12 +10,15 @@ import { CLIENT_DIR } from "./client-cache";
 import { PUBLIC_ORIGIN } from "./config";
 import type { ArticleEntity } from "./articles";
 import { FLAGS, flagList } from "./flags";
+import { guessLang } from "./lang-guess";
 import { homeOf, mentionsIn } from "./mentions";
 import { type MediaRow, absolute, mediaEntity, mediaUrl, posterUrl } from "./media";
 import { placeById } from "./places";
 import { shownSource } from "./platforms";
+import { requestLanguage } from "./staff-access";
 import { settings } from "./settings";
 import { SHORT_POST, previewOf, weightedLength } from "./textlen";
+import { badgeUrl } from "./users";
 
 // a note's text with its links marked, as the note box and the note page expect
 export function noteText(text: string) {
@@ -43,13 +46,21 @@ const globalId = (kind: string, id: string) => Buffer.from(`${kind}:${id}`).toSt
 // Affiliates of an organisation wear X's checkmark next to the organisation's
 // badge, as on X, even without a badge of their own.
 export const isVerified = (u: User) => u.verified_type !== null || !!u.org;
+// a business or government badge: what makes an account an organisation on
+// its own, and gives it a square picture
+export const hasOrgBadge = (u: User) => u.verified_type === "business" || u.verified_type === "government";
+// a business account to X: an organisation badge, or anyone with affiliates
+// (isOrganizationSql in users.ts is the same rule in SQL)
+export const isOrganization = (u: User) => hasOrgBadge(u) || !!u.affiliates;
+// "Verified since": an affiliate's date of joining its organisation, else when the badge was given
+export const verifiedSince = (u: User): Date | null => (u.org?.since ? new Date(u.org.since) : u.verified_at ? new Date(u.verified_at) : null);
 
 // X has two globes: "badged" (blue) and "moderator" (yellow). Approvers get the
 // yellow one; translator moderators the same, which badges.ts colours gold.
 export const translatorType = (u: User) => (u.translator === "translator" ? "badged" : u.translator ? "moderator" : "none");
 
 // organisations, businesses and governments alike, have square pictures; people round ones
-export const pictureShape = (u: User) => (u.verified_type === "business" || u.verified_type === "government" ? "Square" : "Circle");
+export const pictureShape = (u: User) => (hasOrgBadge(u) ? "Square" : "Circle");
 
 // The sheet a checkmark opens: why the account wears it, and since when. The
 // client draws the organisation's row itself from the badge label. Entity
@@ -58,7 +69,7 @@ function verificationInfo(u: User) {
 	if (!isVerified(u)) return { is_identity_verified: false };
 	const instance = settings().instance_name;
 	const parts: (string | { text: string; url: string })[] = u.org
-		? ["This account is Premium because it’s an affiliate of ", { text: `@${u.org.screen_name}`, url: `https://x.com/${u.org.screen_name}` }, ` on ${instance}. `]
+		? ["This account is Premium because it’s an affiliate of ", { text: `@${u.org.screen_name}`, url: `${PUBLIC_ORIGIN}/${u.org.screen_name}` }, ` on ${instance}. `]
 		: u.verified_type === "business"
 			? [`This account is verified because it’s an organisation on ${instance}. `]
 			: u.verified_type === "government"
@@ -78,7 +89,7 @@ function verificationInfo(u: User) {
 		text += p.text;
 		entities.push({ from_index: from, to_index: [...text].length, ref: { url: p.url, url_type: "ExternalUrl" } });
 	}
-	const since = u.org?.since ? new Date(u.org.since) : u.verified_at;
+	const since = verifiedSince(u);
 	return {
 		is_identity_verified: false,
 		reason: { description: { text, entities }, ...(since ? { verified_since_msec: String(new Date(since).getTime()) } : {}) },
@@ -109,7 +120,7 @@ type Badge = { url: string; description: string; org?: string };
 export function badgeList(u: User): Badge[] {
 	const out: Badge[] = [];
 	for (const o of [u.org, ...(u.more_orgs ?? [])]) if (o) out.push({ url: absolute(o.avatar_url) ?? DEFAULT_AVATAR, description: o.name, org: o.screen_name });
-	for (const b of u.badges ?? []) out.push({ url: `${PUBLIC_ORIGIN}/public/badge-${b.id}.png`, description: b.name });
+	for (const b of u.badges ?? []) out.push({ url: badgeUrl(b.id), description: b.name });
 	for (const b of u.remote_badges ?? []) out.push({ url: b.url, description: b.name });
 	for (const f of flagList(u.flag)) out.push({ url: `${PUBLIC_ORIGIN}/public/flag-${f}.svg`, description: `${FLAGS[f].name} flag` });
 	// an account from another instance, last so its own badges keep their place
@@ -176,7 +187,7 @@ export function hiddenLabels(u: User): { text: string; url?: string; icon?: stri
 		out.push({ text: parodyText(u), url: `${PUBLIC_ORIGIN}/rules`, ...(icon ? { icon } : {}) });
 	}
 	if (u.label) {
-		const icon = u.label.badge_id ? `${PUBLIC_ORIGIN}/public/badge-${u.label.badge_id}.png` : parodyMaskIcon();
+		const icon = u.label.badge_id ? badgeUrl(u.label.badge_id) : parodyMaskIcon();
 		out.push({ text: u.label.text, ...(u.label.url ? { url: u.label.url } : {}), ...(icon ? { icon } : {}) });
 	}
 	return out;
@@ -184,7 +195,7 @@ export function hiddenLabels(u: User): { text: string; url?: string; icon?: stri
 
 // a staff-made label, in the shape the client gives its parody label
 function profileLabel(l: NonNullable<User["label"]>) {
-	const icon = l.badge_id ? `${PUBLIC_ORIGIN}/public/badge-${l.badge_id}.png` : parodyMask();
+	const icon = l.badge_id ? badgeUrl(l.badge_id) : parodyMask();
 	return {
 		label: {
 			...(icon ? { badge: { url: icon } } : {}),
@@ -225,13 +236,20 @@ function badgeLabel(u: User) {
 	};
 }
 
+const bioLanguage = (u: User) => {
+	const language = u.bio?.trim() ? guessLang(u.bio) : "und";
+	const viewer = requestLanguage()?.split("-")[0]?.toLowerCase();
+	return { profile_description_language: language, is_profile_translatable: !!viewer && language !== "und" && language !== viewer };
+};
+
 export function userResult(u: User) {
 	return {
 		__typename: "User",
 		action_counts: { favorites_count: u.stats?.likes ?? 0 },
 		affiliates_highlighted_label: badgeLabel(u),
-		...(u.verified_type === "business" || u.verified_type === "government" || u.affiliates ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
+		...(isOrganization(u) ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
 		avatar: { image_url: absolute(u.avatar_url) ?? DEFAULT_AVATAR },
+		...bioLanguage(u),
 		...(u.banner_url ? { banner: { image_url: absolute(u.banner_url) } } : {}),
 		core: { created_at: apiDate(u.created_at), name: u.name, screen_name: u.screen_name },
 		follow_request_sent: !!u.stats?.requestedByViewer,
@@ -282,7 +300,7 @@ export function legacyUser(u: User) {
 		id_str: u.id,
 		favourites_count: u.stats?.likes ?? 0,
 		creator_subscriptions_count: 0,
-		is_profile_translatable: false,
+		...bioLanguage(u),
 		location: u.location,
 		notifications: !!u.stats?.notifying,
 		want_retweets: !u.stats?.repostsMuted,
@@ -412,7 +430,7 @@ function editControl(p: PostRow) {
 const permalink = (p: PostRow) => `${PUBLIC_ORIGIN}/${p.author.screen_name}/status/${p.id}`;
 
 // @names in the text that belong to an account, with code point offsets as the client expects
-function userMentions(p: PostRow) {
+export function userMentions(p: PostRow) {
 	if (!p.mentions?.length) return [];
 	const byName = new Map(p.mentions.map((m) => [m.screen_name.toLowerCase(), m]));
 	return mentionsIn(p.text, homeOf(p.author.screen_name)).flatMap(({ key, start, end }) => {
@@ -421,11 +439,11 @@ function userMentions(p: PostRow) {
 	});
 }
 
-const bioMentions = (u: User) =>
+export const bioMentions = (u: User) =>
 	mentionsIn(u.bio ?? "", homeOf(u.screen_name)).map(({ key, start, end }) => ({ id_str: "", indices: [start, end], screen_name: key }));
 
 // #tags in the text; the client links each to a search for it
-function hashtags(text: string) {
+export function hashtags(text: string) {
 	// any script's letters (#привет), at least one letter, not glued to a word before it
 	return [...text.matchAll(/(?<![\p{L}\p{N}_#&])#([\p{L}\p{N}_]*\p{L}[\p{L}\p{N}_]*)/gu)].map((m) => {
 		const start = [...text.slice(0, m.index)].length;
@@ -529,7 +547,6 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 		grok_analysis_button: false,
 		grok_annotations: {},
 		grok_translated_post_with_availability: { is_available: false },
-		is_translatable: false,
 		legacy: {
 			bookmark_count: p.bookmark_count,
 			bookmarked: p.bookmarked,
@@ -563,7 +580,7 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 						quoted_status_permalink: { url: quoteLink, expanded: quoteLink, display: quoteLink.replace(/^https?:\/\//, "") },
 					}
 				: {}),
-			lang: "und",
+			lang: guessLang(p.text),
 			quote_count: p.quote_count,
 			reply_count: p.reply_count,
 			retweet_count: p.repost_count,

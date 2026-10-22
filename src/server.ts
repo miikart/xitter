@@ -13,17 +13,18 @@ import { flagSvg } from "./flags";
 import { onboarding } from "./onboarding";
 import { cachedPatch, patchFile, patchText } from "./patch";
 import { clientError, recordError } from "./errors";
-import { asRequest, markStaff, staffGate } from "./staff-access";
+import { asRequest, markStaff, setRequestLanguage, staffGate } from "./staff-access";
 import { backupPath, startBackups } from "./backups";
 import { memberInvitesRoute } from "./member-invites";
 import { orgRoute } from "./org-manage";
 import { menuLinks } from "./tidy";
+import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { loadBuild } from "./build";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
-import { shell } from "./shell";
+import { bootScript, shell } from "./shell";
 import { platformSource } from "./platforms";
 import { badgeImage, expireSanctions } from "./moderation";
 import { appealRoute, noticesApi, noticesPage } from "./staff-notices";
@@ -32,6 +33,7 @@ import { twoFactorRoute } from "./two-factor";
 import { passkeySignInRoute, passkeysRoute } from "./passkeys";
 import { extraBadges, instanceCard } from "./badges";
 import { decorationFile, decorationsFor } from "./decorations";
+import { pronounsFor } from "./pronouns";
 import { decorationRoute } from "./decoration-settings";
 import { startScheduler } from "./scheduled";
 import { federationRoute, startFederation } from "./federation-routes";
@@ -46,7 +48,7 @@ import { instancesRoute } from "./federation-settings";
 import { importRoute, resumeImports } from "./archive-import";
 import { stickerImage, stickerPacks } from "./stickers";
 import { apiTokensRoute, publicApi } from "./public-api";
-import { connectedAppsRoute, developerAppsRoute, oauthAuthorize, oauthToken } from "./oauth";
+import { connectedAppsRoute, developerAppsRoute, oauthAppIcon, oauthAuthorize, oauthToken } from "./oauth";
 import { authorizationServerMetadata } from "./oauth-metadata";
 import { apiDocsPage } from "./api-docs";
 import { hashflagAsset } from "./hashflags";
@@ -62,6 +64,11 @@ import { resolveBackground } from "./themes/css";
 import { themeRoute } from "./themes/page";
 import { readPrefs } from "./themes/validate";
 import { serveFont } from "./fonts";
+import { migrationApi } from "./migration";
+import { failInterrupted } from "./migration-import";
+import { migrateRoute } from "./migration-page";
+import { acceptedEncoding, compressResponse, compressedFile } from "./compress";
+import { forgetRanking } from "./ranking";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -79,7 +86,11 @@ const MIME: Record<string, string> = {
 // dev mode it calls the bare paths.
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
-const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
+const SETTINGS_PAGES = new Set(
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa"].map((s) => `/account/${s}`),
+);
+
+const PAGE_CSP ="connect-src 'self' blob: data:; font-src 'self'";
 
 // the instance's own files (logo, icons), open to everyone since the sign-in page uses them
 const PUBLIC_DIR = process.env.PUBLIC_DIR ?? "public";
@@ -114,6 +125,7 @@ const MAX_UNKNOWN_PATHS = 1000;
 
 const apiError = (status: number, code: number, message: string) => Response.json({ errors: [{ code, message }] }, { status });
 
+// a hash of each patched file, for its tags
 const etags = new WeakMap<Buffer, string>();
 
 // The panel names the instance in its markup and in its scripts' single-quoted
@@ -154,13 +166,18 @@ async function serveClient(req: Request, pathname: string): Promise<Response> {
 		if (!raw) return new Response("not found", { status: 404 });
 		body = patchFile(cdnPath, raw, original);
 	}
-	let etag = etags.get(body);
-	if (!etag) {
-		etag = `"${Bun.hash(body).toString(36)}"`;
-		etags.set(body, etag);
+	let hash = etags.get(body);
+	if (!hash) {
+		hash = Bun.hash(body).toString(36);
+		etags.set(body, hash);
 	}
-	if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag, ...(settings().original_branding_for_members ? { vary: "cookie" } : {}) } });
-	return new Response(new Uint8Array(body), { headers: { "content-type": type, "cache-control": "no-cache", etag, ...(settings().original_branding_for_members ? { vary: "cookie" } : {}) } });
+	// each encoding is its own representation, with its own tag
+	const encoding = acceptedEncoding(req);
+	const etag = `"${hash}${encoding ? `-${encoding}` : ""}"`;
+	const headers: Record<string, string> = { "content-type": type, "cache-control": "no-cache", etag, vary: settings().original_branding_for_members ? "accept-encoding, cookie" : "accept-encoding" };
+	if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
+	if (!encoding) return new Response(new Uint8Array(body), { headers });
+	return new Response(await compressedFile(body, encoding), { headers: { ...headers, "content-encoding": encoding } });
 }
 
 const MAX_API_BODY = 2 * 1024 * 1024;
@@ -212,11 +229,14 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		if (!delegateMay(acting.actor!.role, req.method, path, operation)) return apiError(403, 200, "Delegates can't do this for the account.");
 		viewer = acting;
 	}
+	// a follow, block, mute or like changes what "For you" would rank
+	if (req.method !== "GET") forgetRanking(viewer.id);
 	const limited = limitApi(viewer, req.method, path, operation, url);
 	if (limited) return limited;
 	if (path === "/xitter/moderation") return noticesApi(req, viewer);
 	if (path === "/xitter/badges") return extraBadges(viewer.id, url);
 	if (path === "/xitter/decorations") return decorationsFor(url);
+	if (path === "/xitter/pronouns") return pronounsFor(url);
 	if (path === "/xitter/instance") return instanceCard(viewer.id, url);
 	if (path === "/xitter/decor") return decorFor(url);
 	if (path === "/xitter/decor/shop") return decorShop(url);
@@ -281,12 +301,14 @@ setInterval(
 await loadSettings();
 await resumeVideos(MEDIA_DIR);
 await resumeImports();
+await failInterrupted();
 
 // a request that throws is answered by Bun's error() below, which doesn't know
 // the request; caught here it is logged with its path and account
 async function handle(req: Request): Promise<Response | undefined> {
 	try {
-		return await asRequest(() => route(req));
+		const res = await asRequest(() => route(req));
+		return res && (await compressResponse(req, res, new URL(req.url).pathname));
 	} catch (e) {
 		const viewer = await getViewer(req).catch(() => undefined);
 		await recordError("server", e, { path: `${req.method} ${new URL(req.url).pathname}`, userId: viewer?.id });
@@ -305,7 +327,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	if (p === "/federation/superadmin/accept") return acceptTicket(req, requestIp(req) ?? "unknown");
 	// /i/xitter/* holds Xitter's own static files, served before sign-in and
-	// rate limits: avatar decoration images and the locally cached Google Fonts.
+	// rate limits: avatar decoration images, the locally cached Google Fonts and
+	// the page's own scripts (shell.ts bootScript).
 	// Everything else under this prefix 404s on purpose. Without that line an
 	// unknown or missing file here (a font that failed to download, a stale
 	// decoration link) would fall through to the client shell and come back as
@@ -314,6 +337,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	// reached. JSON endpoints belong under /i/api/xitter/ instead (serveApi).
 	if (p.startsWith("/i/xitter/decoration/")) return (await decorationFile(url)) ?? new Response("not found", { status: 404 });
 	if (p.startsWith("/i/xitter/fonts/")) return serveFont(url, url.searchParams.has("family") && !!(await getViewer(req)));
+	if (p.startsWith("/i/xitter/boot-")) {
+		const body = bootScript(p);
+		if (!body) return new Response("not found", { status: 404 });
+		const headers = { "content-type": MIME.js, "cache-control": "public, max-age=31536000, immutable", vary: "accept-encoding" };
+		const encoding = acceptedEncoding(req);
+		return encoding ? new Response(await compressedFile(body, encoding), { headers: { ...headers, "content-encoding": encoding } }) : new Response(new Uint8Array(body), { headers });
+	}
 	if (p.startsWith("/i/xitter/")) return new Response("not found", { status: 404 });
 	if (req.method !== "GET" && req.method !== "HEAD" && req.headers.has("cookie")) {
 		const site = req.headers.get("sec-fetch-site");
@@ -343,9 +373,14 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (!raw) return new Response("no pinned chat build", { status: 404 });
 		return new Response(patchText(raw.toString("utf8")), { headers: { "content-type": "application/json", "cache-control": "no-cache" } });
 	}
+	// account migration: another instance reads an account here with the code
+	// the account made (migration.ts); never cookies
+	if (p.startsWith("/migration/v1/")) return migrationApi(req, url);
 	// the public API signs in with its own tokens, never cookies
 	if (p.startsWith("/api/v1/") || p === "/api/v1") return publicApi(req, url);
 	if (p === "/oauth/token") return oauthToken(req);
+	const appIcon = /^\/oauth\/apps\/(\d{1,19})\/icon$/.exec(p);
+	if (appIcon && req.method === "GET") return oauthAppIcon(appIcon[1]!);
 	if (p === "/.well-known/oauth-authorization-server") return authorizationServerMetadata();
 	if (p === "/api" || p === "/api/") return apiDocsPage(req);
 	if (req.method === "OPTIONS") return new Response(null, { status: 204 });
@@ -378,11 +413,11 @@ async function route(req: Request): Promise<Response | undefined> {
 	// people sign in and up on the signed-out home page; an invite link's code
 	// is kept for the dialog, which then skips asking for it
 	// X's own add-email flow: ours is a page
-	if (p === "/i/flow/add_email") return Response.redirect("/account/email", 302);
+	if (p === "/i/flow/add_email") return Response.redirect("/settings/xitter/email", 302);
 	// and X's automated-account flow (automation.ts)
-	if (p === "/i/flow/enable_automated_account") return Response.redirect("/account/automation", 302);
+	if (p === "/i/flow/enable_automated_account") return Response.redirect("/settings/xitter/automation", 302);
 	// and X's passkey settings and flows: ours is a page (passkeys.ts)
-	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p)) return Response.redirect("/account/passkeys", 302);
+	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p) && !p.startsWith("/settings/xitter/")) return Response.redirect("/settings/xitter/passkeys", 302);
 	// the built-in "All" list (lists.ts)
 	if (p === "/all") return Response.redirect("/i/lists/1", 302);
 	if (p === "/login" || p === "/signup" || p.startsWith("/i/flow/")) {
@@ -399,6 +434,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/manifest.json") return manifest(originalBrand(settings().original_branding_for_members && !!parseCookies(req).auth_token && !!(await getViewer(req).catch(() => undefined))));
 
 	const viewer = await getViewer(req);
+	setRequestLanguage(viewer?.language ?? undefined);
 	const steam = /^\/public\/steam\/(\d+)\/([^/]+)$/.exec(p);
 	if (steam) return steamFile(req, steam[1]!, steam[2]!, url.searchParams.has("thumb"), !!viewer);
 	if (viewer?.role && !(await staffGate(req, viewer))) markStaff();
@@ -422,6 +458,10 @@ async function route(req: Request): Promise<Response | undefined> {
 		}
 		if (!open && req.method !== "GET") return apiError(403, 64, "Your account is suspended and is not permitted to access this feature.");
 	}
+	// opened on their own (a link, a bookmark), the settings pages come up inside
+	// the client's Settings, which frames them (tidy.ts)
+	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && SETTINGS_PAGES.has(p))
+		return Response.redirect(`/settings/xitter/${p.slice("/account/".length)}${url.search}`, 302);
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
@@ -452,10 +492,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/organisation" && viewer) return orgRoute(req, viewer);
 	if (p === "/account/decor" && viewer) return decorRoute(req, viewer);
 	if (p === "/account/theme" && viewer) return themeRoute(req, viewer);
+	if (p === "/account/migrate" && viewer) return migrateRoute(req, viewer);
 	if (p.startsWith("/i/ton/data/xchat_media/")) return chatMediaRoute(req, viewer, url);
 	// pictures and oEmbed for previews of public posts in other apps (embeds.ts)
 	if (p.startsWith("/embed/")) return embedImage(p);
 	if (p === "/oembed") return oembed(url);
+	// the frame X's client opens for a player card (YouTube links)
+	if (isPlayerPage(p)) return viewer ? playerPage(p, viewer.id) : new Response("not found", { status: 404 });
 	// uploads stay inside the instance: only signed-in users get them
 	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p, viewer) : new Response("not found", { status: 404 });
 	// the admin panel: staff only; everyone else gets the client's not-found page
