@@ -2,7 +2,7 @@
 // Everything about the signed-in account is ours.
 
 import type { User } from "./auth";
-import { loadBuild } from "./build";
+import { type Build, loadBuild } from "./build";
 import { feature, settings } from "./settings";
 import { postLimitFor } from "./textlen";
 import { CONVERSATION_CARD_CSS, CONVERSATION_CARD_SCRIPT } from "./conversation-card-ui";
@@ -23,7 +23,7 @@ import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-pick
 import { PUBLIC_ORIGIN } from "./config";
 import { legacyUser } from "./model";
 import { patchText } from "./patch";
-import { PWA_SCRIPT, pwaHead } from "./pwa";
+import { BRAND_NAME, PWA_SCRIPT, brandIcons, originalBrand, pwaHead } from "./pwa";
 
 // account settings as the client expects them
 export function settingsFor(user: User): Record<string, unknown> {
@@ -154,7 +154,12 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_edit_tweet_composition_enabled: { value: true },
 	responsive_web_edit_tweet_perspective_enabled: { value: true },
 });
-const overrideSwitches = () => Object.fromEntries(Object.entries(settings().switch_overrides).map(([k, value]) => [k, { value }]));
+// every build's, then the serving build's own
+const overrideSwitches = () => {
+	const sha = loadBuild()?.build.sha;
+	const merged = { ...settings().switch_overrides, ...(sha ? settings().build_switch_overrides[sha] : {}) };
+	return Object.fromEntries(Object.entries(merged).map(([k, value]) => [k, { value }]));
+};
 // Long posts for everyone, up to the limit of the viewer's badge (textlen.ts):
 // the composer reads its limit from this switch and sends CreateNoteTweet past 280.
 const longPostSwitches = (user: User | null) => ({
@@ -171,35 +176,65 @@ const clientSwitches = (config: Record<string, unknown>, user: User | null = nul
 });
 
 // every switch the build knows, with where its value comes from (admin panel)
-export function switchReport() {
-	const fs = loadBuild()?.build.featureSwitch;
+// of the serving build, or of another from the library (feature-switches.ts)
+export function switchReport(of: Build | undefined = loadBuild()?.build) {
+	const fs = of?.featureSwitch;
 	const build = { ...(fs?.defaultConfig ?? {}), ...(fs?.config ?? {}) } as Record<string, { value: unknown }>;
 	const own = ownSwitches();
 	const overrides = settings().switch_overrides;
-	const names = [...new Set([...Object.keys(build), ...Object.keys(own), ...Object.keys(overrides)])].sort();
+	const forBuild = (of && settings().build_switch_overrides[of.sha]) || {};
+	const names = [...new Set([...Object.keys(build), ...Object.keys(own), ...Object.keys(overrides), ...Object.keys(forBuild)])].sort();
 	return names.map((name) => ({
 		name,
 		build: build[name]?.value,
 		...(name in own ? { xitter: own[name].value } : {}),
 		...(name in overrides ? { override: overrides[name] } : {}),
+		...(name in forBuild ? { buildOverride: forBuild[name] } : {}),
 	}));
 }
 
+// What the 2018-2020 builds' stores start from and the later ones don't need:
+// added only where initialState leaves a key out, so nothing it sets is changed.
+const FLAT_STATE = {
+	entities: { tweets: { entities: {}, errors: {}, fetchStatus: {} }, cards: { entities: {}, errors: {}, fetchStatus: {} } },
+	settings: { local: { themeBackground: "light", mediaPreviewsEnabled: true, conversationTreeEnabled: false }, transient: { dtabBarInfo: { dtabAll: null, dtabRweb: null, hide: false } } },
+	session: { emailLiteLoginEligibility: { fetchStatus: "none" }, oneFactorLoginEligibility: { fetchStatus: "none" } },
+	devices: { notificationSettings: { sms_settings: { error: null, fetchStatus: "none" }, sms_settings_template: { template: { settings: [] } } } },
+};
+
+function fillMissing(into: Record<string, any>, from: Record<string, any>) {
+	for (const [k, v] of Object.entries(from)) {
+		if (!(k in into)) into[k] = structuredClone(v);
+		else if (v && typeof v === "object" && !Array.isArray(v) && into[k] && typeof into[k] === "object") fillMissing(into[k], v);
+	}
+	return into;
+}
+
 function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT) {
+	const state = buildState(user, fs, inCommunity, educationFlags, accent);
+	return fs.flat ? fillMissing(state, FLAT_STATE) : state;
+}
+
+function buildState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT): Record<string, any> {
 	return {
 		optimist: [],
+		// the 2020 builds read a timeline store these pages start empty
+		...(fs.flat ? { urt: {}, toasts: [], typeaheadUsers: { fetchStatus: "none", users: {}, denylist: {}, lastUpdated: 0, index: {} }, hashflags: { fetchStatus: "none", hashflags: {} } } : {}),
 		entities: {
 			users: user ? { entities: { [user.id]: legacyUser(user) }, errors: {}, fetchStatus: { [user.id]: "loaded" } } : { entities: {}, errors: {}, fetchStatus: {} },
 		},
-		featureSwitch: {
-			defaultConfig: clientSwitches(fs.defaultConfig, user),
-			user: { config: clientSwitches(fs.config, user), impression_pointers: {}, impressions: {}, keysRead: {}, settingsVersion: fs.settingsVersion },
-			debug: {},
-			featureSetToken: fs.featureSetToken,
-			isLoaded: true,
-			isLoading: false,
-			customOverrides: {},
-		},
+		// builds from before 2020 keep their switches in featureSwitch.config itself
+		featureSwitch: fs.flat
+			? { config: clientSwitches(fs.config, user), debug: {}, impression_pointers: {}, impressions: {}, keysRead: {}, featureSetToken: fs.featureSetToken, settingsVersion: fs.settingsVersion, isLoaded: true, isLoading: false }
+			: {
+					defaultConfig: clientSwitches(fs.defaultConfig, user),
+					user: { config: clientSwitches(fs.config, user), impression_pointers: {}, impressions: {}, keysRead: {}, settingsVersion: fs.settingsVersion },
+					debug: {},
+					featureSetToken: fs.featureSetToken,
+					isLoaded: true,
+					isLoading: false,
+					customOverrides: {},
+				},
 		settings: {
 			local: {
 				nextPushCheckin: 0,
@@ -266,6 +301,8 @@ let runtimePatched: { sha: string; text: string } | undefined;
 // asks for them.
 export function shell(user: User | null, multi = false, inCommunity = false, educationFlags: Record<string, number> = {}, links: MenuLink[] = [], look: Look | null = null, accent: Accent = DEFAULT_ACCENT, paint?: BackgroundPaint, csrf?: string): string | undefined {
 	const theme = look?.kind === "painted" ? look.theme : null;
+	const brand = originalBrand(!!user);
+	const original = !!brand;
 	const loaded = loadBuild();
 	if (!loaded) return undefined;
 	const { build, runtime } = loaded;
@@ -273,17 +310,17 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 	// the chat build's address is ours (the rest of the metadata stays as captured:
 	// the client decides from it where its csrf header goes)
 	const chatBuild = build.meta.xchatEmbedBuild;
-	const meta = { ...build.meta, ...(typeof chatBuild === "string" ? { xchatEmbedBuild: patchText(chatBuild) } : {}), sha: build.sha, isLoggedIn: !!user, userId: user?.id ?? null, hasMultiAccountCookie: !!user && multi, serverDate: Date.now() };
+	const meta = { ...(build.featureSwitch.flat ? { isRTL: false, isFromDynamicRenderer: false } : {}), ...build.meta, ...(typeof chatBuild === "string" ? { xchatEmbedBuild: patchText(chatBuild) } : {}), sha: build.sha, isLoggedIn: !!user, userId: user?.id ?? null, hasMultiAccountCookie: !!user && multi, serverDate: Date.now() };
 	const scripts = build.scripts
 		.map((p) => `<script defer charset="utf-8" crossorigin="anonymous" src="${PUBLIC_ORIGIN}/abs${p}"></script>`)
 		.join("");
 	return `<!DOCTYPE html><html dir="ltr" lang="en"${theme ? ` data-xitter-theme="${esc(theme.id)}"` : ""} data-xitter-accent="${esc(accent.kind === "named" ? accent.id : "custom")}"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0,viewport-fit=cover" />
-<meta name="theme-color" content="${theme ? esc(theme.bg.stops[0] ?? "#000000") : "#000000"}" /><title>${esc(settings().instance_name)}</title>
-<link rel="icon" type="image/png" href="/public/favicon.png" />${pwaHead()}${fontLinks(theme)}
-<style>html,body{height:100%}body{margin:0;background-color:#000}
+<meta name="theme-color" content="${theme ? esc(theme.bg.stops[0] ?? "#000000") : "#000000"}" /><title>${brand ? BRAND_NAME[brand] : esc(settings().instance_name)}</title>
+<link rel="icon" type="image/png" href="${brandIcons(brand).icon}" />${pwaHead(brand)}${fontLinks(theme)}
+<style>html,body{height:100%}body{margin:0;background-color:${build.featureSwitch.flat ? "#fff" : "#000"}}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
-@media (display-mode:standalone){body{overscroll-behavior-y:none}}${LOGO_CSS}
+@media (display-mode:standalone){body{overscroll-behavior-y:none}}${original ? "" : LOGO_CSS}
 ${hideCss()}
 ${FLAG_PICKER_CSS}
 ${STICKER_PICKER_CSS}${bootAccentCss(accent)}${theme ? bootCss(theme, paint) : ""}

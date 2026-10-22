@@ -6,6 +6,9 @@ import { dirname, join, normalize } from "node:path";
 
 export const CLIENT_DIR = process.env.CLIENT_DIR ?? "client";
 export const CDN_ORIGIN = "https://abs.twimg.com";
+// Builds from before the CDN's retention are fetched from the Internet Archive
+// instead: asset names are content-hashed, so any capture of the URL is the file.
+const ARCHIVE_ORIGIN = "https://web.archive.org/web/2id_";
 const downloads = new Map<string, Promise<Buffer | undefined>>();
 
 function localPath(cdnPath: string): string | undefined {
@@ -29,8 +32,13 @@ export async function getClientFile(cdnPath: string, allowFetch = true): Promise
 	let pending = downloads.get(p);
 	if (!pending) {
 		pending = (async () => {
-			const res = await fetch(CDN_ORIGIN + cdnPath);
-			if (!res.ok) return undefined;
+			let res = await fetch(CDN_ORIGIN + cdnPath).catch(() => undefined);
+			// 2018 pages used the abs-0 alias, which is what the archive captured
+			for (const host of [CDN_ORIGIN, "https://abs-0.twimg.com"])
+				if (!res?.ok) res = await fetch(`${ARCHIVE_ORIGIN}/${host}${cdnPath}`, { redirect: "follow" }).catch(() => undefined);
+			if (!res?.ok) return undefined;
+			// the archive answers a missing file with a page, not a 404
+			if (/\.js$/.test(cdnPath) && (res.headers.get("content-type") ?? "").includes("text/html")) return undefined;
 			const buf = Buffer.from(await res.arrayBuffer());
 			mkdirSync(dirname(p), { recursive: true });
 			writeFileSync(p, buf);

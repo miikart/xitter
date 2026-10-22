@@ -18,6 +18,8 @@ import { PollError, createCard, vote } from "./polls";
 import { placeById, searchPlaces } from "./places";
 import { reportFlow } from "./reports";
 import { settingsFor } from "./shell";
+import { restLegacyRoute } from "./rest-legacy";
+import { bootEndpoint, homeTimeline, restStatusRoute, restTimelineRoute } from "./rest-timeline";
 import { changeCountryFlow } from "./country-setting";
 import { hashtagsLike, searchUsers } from "./search";
 import { STAFF_HANDLE } from "./invites";
@@ -172,6 +174,17 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 		return place ? Response.json(place) : Response.json({ errors: [{ code: 34, message: "Sorry, that page does not exist." }] }, { status: 404 });
 	}
 	// alt text for an uploaded image, sent before the post is made
+	// web clients before November 2022 (rest-timeline.ts)
+	if (method === "GET" && (path === "/2/timeline/home.json" || path === "/2/timeline/home_latest.json"))
+		return homeTimeline(viewer, new URL(req.url).searchParams, path.endsWith("_latest.json"));
+	const legacy = (await restTimelineRoute(method, path, viewer, req)) ?? (await restStatusRoute(method, path, viewer, req)) ?? (await restLegacyRoute(method, path, viewer, req));
+	if (legacy) return legacy;
+	// the Branch tracking SDK the 2019-2022 clients start: off, so it never loads
+	if (method === "POST" && path === "/1.1/branch/init.json") return Response.json({ is_loading_enabled: false, is_tracking_enabled: false });
+	if (method === "GET") {
+		const boot = bootEndpoint(path);
+		if (boot) return boot;
+	}
 	if (method === "POST" && path === "/1.1/media/metadata/create.json") {
 		const body: any = await req.json().catch(() => ({}));
 		const alt = typeof body?.alt_text?.text === "string" ? body.alt_text.text.slice(0, 1000) : undefined;

@@ -213,6 +213,23 @@ alongside `DB_POOL_MAX` for the number of app replicas. Backups use a direct
 PostgreSQL connection. The Compose PostgreSQL service also uses conservative
 cache and autovacuum settings; adjust them for the host's memory and workload.
 
+### Another frontend build
+
+`client/builds/<name>/` holds extra pins (a `build.json` and `runtime.js` pair)
+that Admin > Client can switch to. Switching is instant: the next page load gets
+that build, no restart, and signed-in sessions stay. Add one with
+
+```sh
+bun scripts/install-build.ts <dir-or-page> [name] [--legacy-login] [--date=YYYY-MM-DD]
+```
+
+where the source is a directory holding that pair, or a saved copy of a client
+page (`--page`). `--legacy-login` sends guests to the plain `/login` form for
+archived clients whose own sign-in dialog doesn't work (the 2022 client sends
+people to `/i/flow/login`, which has no page of its own). Inside Docker the
+`client` volume shadows the repository's `client/`, so copy a build in:
+`docker compose cp client/builds/2022-11 app:/app/client/builds/2022-11`.
+
 ### Keep these private
 
 - An `auth_token` cookie is a live login to your X account. Use it only for

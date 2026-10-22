@@ -1,10 +1,11 @@
-import { type Viewer, getViewer, parseCookies, csrfCookie } from "./auth";
+import { type Viewer, clearedCookies, getViewer, logout, parseCookies, csrfCookie } from "./auth";
 import { getClientFile, getClientFilePath } from "./client-cache";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
 import { brandingFile } from "./branding";
-import { handleLogin, maintenancePage, rulesPage } from "./login";
+import { suspendedBanner } from "./login";
+import { loginForm, loginPage, maintenancePage, rulesPage, signupPage } from "./login";
 import { adminApi, audit } from "./admin";
 import { loadSettings, settings } from "./settings";
 import { flagPickerData } from "./flag-picker";
@@ -51,7 +52,7 @@ import { apiDocsPage } from "./api-docs";
 import { hashflagAsset } from "./hashflags";
 import { startMailDigests } from "./mail-digest";
 import { SERVICE_WORKER, startPush } from "./push";
-import { manifest } from "./pwa";
+import { BRAND_NAME, brandIcons, manifest, originalBrand } from "./pwa";
 import { emailRoute } from "./email-address";
 import { embedImage, linkPreview, oembed } from "./embeds";
 import { noteAppealsRoute } from "./note-appeals";
@@ -145,19 +146,21 @@ async function serveClient(req: Request, pathname: string): Promise<Response> {
 
 	// The file name stays the same when our patches change, so patched files are
 	// revalidated against a hash of what we actually serve.
-	let body = cachedPatch(cdnPath);
+	// signed-in accounts may get the client's own brand (Admin > Settings)
+	const original = settings().original_branding_for_members && !!parseCookies(req).auth_token && !!(await getViewer(req).catch(() => undefined));
+	let body = cachedPatch(cdnPath, original);
 	if (!body) {
 		const raw = await getClientFile(cdnPath);
 		if (!raw) return new Response("not found", { status: 404 });
-		body = patchFile(cdnPath, raw);
+		body = patchFile(cdnPath, raw, original);
 	}
 	let etag = etags.get(body);
 	if (!etag) {
 		etag = `"${Bun.hash(body).toString(36)}"`;
 		etags.set(body, etag);
 	}
-	if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag } });
-	return new Response(new Uint8Array(body), { headers: { "content-type": type, "cache-control": "no-cache", etag } });
+	if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag, ...(settings().original_branding_for_members ? { vary: "cookie" } : {}) } });
+	return new Response(new Uint8Array(body), { headers: { "content-type": type, "cache-control": "no-cache", etag, ...(settings().original_branding_for_members ? { vary: "cookie" } : {}) } });
 }
 
 const MAX_API_BODY = 2 * 1024 * 1024;
@@ -349,8 +352,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/login" && req.method === "POST") {
 		const h = hit("auth", requestIp(req) ?? "unknown");
 		if (!h.ok) return limitedResponse(h);
-		return handleLogin(req);
+		return loginForm(req);
 	}
+	// an archived client sends "Log in" and "Sign up" to these; without them
+	// they fall through to the redirect below and bounce back to "/" forever
+	if (p === "/login" && req.method === "GET") return loginPage();
+	if (p === "/i/flow/login" || p === "/i/flow/signin") return loginPage();
+	if (p === "/i/flow/signup") return signupPage();
 	if (p === "/rules" || p === "/tos" || p === "/privacy") return rulesPage();
 	// X's sign-in screens (jf.x.com), answered here
 	// inside the signed-in client the same screens come through /i/jfapi
@@ -383,10 +391,12 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (code) headers.append("set-cookie", `xitter_invite=${encodeURIComponent(code)}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly`);
 		return new Response(null, { status: 302, headers });
 	}
+	if (p === "/__uitest") return new Response(`<!doctype html><script>document.cookie="auth_token=uitok; path=/; SameSite=Lax";document.cookie="ct0=uicsrf; path=/; SameSite=Lax";location.replace("/home");</script>`, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 	if (p.startsWith("/public/") && !p.startsWith("/public/steam/")) return servePublic(p);
-	if (p === "/favicon.ico") return servePublic("/public/favicon.png");
+	// the favicon and manifest depend on the account (the client's own brand for members)
+	if (p === "/favicon.ico") return servePublic(brandIcons(originalBrand(settings().original_branding_for_members && !!parseCookies(req).auth_token && !!(await getViewer(req).catch(() => undefined)))).icon);
 	if (p === "/sw.js") return new Response(SERVICE_WORKER, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
-	if (p === "/manifest.json") return manifest();
+	if (p === "/manifest.json") return manifest(originalBrand(settings().original_branding_for_members && !!parseCookies(req).auth_token && !!(await getViewer(req).catch(() => undefined))));
 
 	const viewer = await getViewer(req);
 	const steam = /^\/public\/steam\/(\d+)\/([^/]+)$/.exec(p);
@@ -398,6 +408,19 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (viewer && !viewer.role && settings().operations.maintenance) {
 		if (API_PREFIX.test(p) || req.method !== "GET") return apiError(503, 130, settings().operations.message);
 		return maintenancePage();
+	}
+	// a suspended account stays signed in: the app is closed to it and it is told
+	// why, with a way to appeal or sign out. The API answers as X does (code 64).
+	if (viewer?.status === "suspended" && !viewer.role) {
+		const apiPath = p.replace(/^\/i\/(jf)?api/, "");
+		const open = /^\/(1\.1\/account\/(multi\/)?logout(_all)?\.json|xitter\/moderation)$/.test(apiPath);
+		if (p === "/suspended/logout" && req.method === "POST") {
+			await logout(viewer.token);
+			const headers = new Headers({ location: "/" });
+			for (const c of clearedCookies()) headers.append("set-cookie", c);
+			return new Response(null, { status: 303, headers });
+		}
+		if (!open && req.method !== "GET") return apiError(403, 64, "Your account is suspended and is not permitted to access this feature.");
 	}
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
@@ -463,6 +486,10 @@ async function route(req: Request): Promise<Response | undefined> {
 		const preview = await linkPreview(p);
 		if (preview) return preview;
 	}
+	// an archived build (Admin > Client) signs in through X's dialog, which
+	// expects the current flow; guests get the plain form instead of its
+	// signed-out page, whose Log in button cannot complete
+	if (!viewer && p === "/" && loadBuild()?.build.legacy_login) return Response.redirect("/login", 302);
 	// signed out: X's own home page with its sign-in form, and the dialog
 	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);
 	// maintenance: guests see the notice; ?staff=1 is the sign-in page, for staff
@@ -486,6 +513,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (viewer && parseCookies(req).ct0 !== viewer.csrf) headers.append("set-cookie", csrfCookie(viewer.csrf));
 	for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	if (!page) return new Response("no pinned client build: run scripts/fetch-client.ts --token or --har", { status: 500, headers });
+	// a suspended account sees the app with X's notice at the top of the timeline (the API refuses it)
+	if (viewer?.status === "suspended" && !viewer.role) {
+		const [row] = await sql`select status_until from users where id = ${viewer.id}::bigint`;
+		const dark = look ? (look.kind === "painted" ? look.theme.base === "dark" : look.mode === "dark") : parseCookies(req).night_mode !== "0";
+		const brand = originalBrand(true);
+		return new Response(page.replace("</body>", `${suspendedBanner(row?.status_until ?? null, dark, brand ? BRAND_NAME[brand] : settings().instance_name)}</body>`), { headers });
+	}
 	return new Response(page, { headers });
 }
 

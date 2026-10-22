@@ -13,7 +13,9 @@ COPY src src
 COPY public public
 COPY scripts scripts
 COPY instances.json instances.json
-COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint
+# split in two so the classic builder (no buildx plugin) works too
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint
+RUN chmod 755 /usr/local/bin/entrypoint
 # volumes mount here; created now so they belong to the bun user
 RUN mkdir -p client media data && chown bun:bun client media data
 USER bun

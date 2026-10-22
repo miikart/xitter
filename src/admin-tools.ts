@@ -20,7 +20,8 @@ import { setSetting, settings } from "./settings";
 import { clientIp, ipAllowed, parseRange } from "./staff-access";
 import { allows } from "./staff-permissions";
 import { BACKUP_DIR, createBackup, deleteBackup, listBackups } from "./backups";
-import { clientStatus, latestSha, rollbackClient, updateClient } from "./client-update";
+import { importCapture, listCaptures } from "./client-archive";
+import { clientStatus, latestSha, listBuilds, rollbackClient, saveCurrentBuild, updateClient, useBuild } from "./client-update";
 import { decideImport, pendingImports } from "./archive-import";
 
 const STANDINGS = ["active", "restricted", "limited", "suspended"];
@@ -650,7 +651,7 @@ export const toolActions: Record<string, Action> = {
 	},
 
 	// client-update.ts
-	client: { role: "admin", run: async () => clientStatus() },
+	client: { role: "admin", run: async () => ({ ...clientStatus(), builds: listBuilds() }) },
 	checkClient: {
 		role: "admin",
 		run: async () => ({ latest: await latestSha().catch((e: Error) => { throw new AdminError(e.message); }), ...clientStatus() }),
@@ -676,6 +677,57 @@ export const toolActions: Record<string, Action> = {
 			}
 			await audit(a, "rollback_client", null, { from: before, to: sha });
 			return { sha };
+		},
+	},
+	// switch the frontend to another pin in client/builds/ (hot: the next page
+	// load gets it, no restart)
+	useClientBuild: {
+		role: "admin",
+		run: async (a, b) => {
+			const id = typeof b.id === "string" ? b.id : "";
+			const before = clientStatus().sha;
+			let sha: string;
+			try {
+				sha = useBuild(id);
+			} catch (e: any) {
+				throw new AdminError(e.message);
+			}
+			await audit(a, "switch_client_build", null, { from: before, to: sha, build: id });
+			return { sha };
+		},
+	},
+	// the Internet Archive's captures of the web app, one a month from `from` on
+	// (2018 is the earliest year it has pages for), and taking one into the library
+	archiveCaptures: {
+		role: "admin",
+		run: async (_a, b) => {
+			const now = new Date().getUTCFullYear();
+			const from = Math.min(Math.max(Math.trunc(Number(b.from)) || 2018, 2018), now);
+			const to = Math.min(Math.max(Math.trunc(Number(b.to)) || now, from), now);
+			return { captures: await listCaptures(from, to).catch((e: Error) => { throw new AdminError(e.message); }) };
+		},
+	},
+	importArchivedBuild: {
+		role: "admin",
+		run: async (a, b) => {
+			const done = await importCapture(String(b.timestamp ?? ""), String(b.page ?? ""), typeof b.id === "string" ? b.id : undefined).catch((e: Error) => { throw new AdminError(e.message); });
+			if (!done.existing) await audit(a, "import_archived_build", null, { build: done.id, sha: done.sha, captured: done.date });
+			return done;
+		},
+	},
+	// copy the pin that is serving now into client/builds/ under a name
+	saveClientBuild: {
+		role: "admin",
+		run: async (a, b) => {
+			const id = typeof b.id === "string" ? b.id : "";
+			let saved;
+			try {
+				saved = saveCurrentBuild(id);
+			} catch (e: any) {
+				throw new AdminError(e.message);
+			}
+			await audit(a, "save_client_build", null, { build: saved.id, sha: saved.sha });
+			return saved;
 		},
 	},
 

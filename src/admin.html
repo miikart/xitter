@@ -203,6 +203,8 @@ const PAGES = {
 function go(hash) { location.hash = hash; }
 window.addEventListener("hashchange", route);
 
+// which build Admin > Feature switches is showing, and whether a change reaches every build
+let switchBuild = "", switchScope = "all";
 async function route() {
 	const [page, arg] = location.hash.slice(1).split("/");
 	const name = PAGES[page] ? page : page === "user" ? "users" : "overview";
@@ -249,12 +251,43 @@ const RENDER = {
 	async client(main) {
 		const c = await api("client");
 		const short = (sha) => sha ? sha.slice(0, 10) : "none";
+		const builds = c.builds || [];
 		main.innerHTML = "<h1>Client</h1>" +
 			'<p class="dim">The X web client this instance serves is a pinned build. Updating pins the build x.com serves now (what <span class="code">bun scripts/fetch-client.ts --latest</span> does) and keeps the current one to go back to. A new build can bring requests this server doesn\'t answer yet; check the app after updating. A pin taken with --token loses its signed-in feature switches here: run it by hand to keep them.</p>' +
 			'<div class="cards"><div class="card"><span>Serving</span><b class="code">' + esc(short(c.sha)) + '</b><span class="small dim">pinned ' + esc(when(c.fetchedAt)) + "</span></div>" +
 			'<div class="card"><span>Previous</span><b class="code">' + esc(short(c.previous?.sha)) + "</b>" + (c.previous ? '<span class="small dim">pinned ' + esc(when(c.previous.fetchedAt)) + "</span>" : "") + "</div>" +
 			'<div class="card"><span>On x.com</span><b class="code" id="latest">?</b></div></div>' +
-			'<div class="row" style="margin-top:16px"><button class="btn" id="ccheck">Check x.com</button><button class="btn primary" id="cupdate">Update</button>' + (c.previous ? '<button class="btn" id="cback">Go back to the previous build</button>' : "") + "</div>";
+			'<div class="row" style="margin-top:16px"><button class="btn" id="ccheck">Check x.com</button><button class="btn primary" id="cupdate">Update</button>' + (c.previous ? '<button class="btn" id="cback">Go back to the previous build</button>' : "") + "</div>" +
+			'<div class="box" style="margin-top:24px"><h2>Builds in the library</h2>' +
+			'<p class="dim">Anything kept in <span class="code">client/builds/&lt;name&gt;/</span> (a <span class="code">build.json</span> and <span class="code">runtime.js</span> pair) can be served. Switching is instant: the next page load gets that build, no restart, and people stay signed in. Archived builds are marked <span class="code">form login</span> when their own sign-in dialog can\'t complete; guests then get the plain <span class="code">/login</span> form.</p>' +
+			(builds.length
+				? '<div class="scroll"><table class="table"><tr><th>Name</th><th>Build</th><th>Pinned</th><th>Entry files</th><th>Login</th><th></th><th></th></tr>' +
+					builds.map((b) => '<tr><td class="code">' + esc(b.id) + '</td><td class="code">' + esc(short(b.sha)) + '</td><td class="small dim">' + esc(b.fetchedAt ? when(b.fetchedAt) : "unknown") + '</td><td class="small dim">' + b.scripts + '</td><td class="small dim">' + (b.legacyLogin ? "form" : "dialog") + '</td><td class="row">' + (b.active ? '<span class="small dim">serving</span>' : '<button class="btn" data-use="' + esc(b.id) + '">Use</button>') + '</td><td><a href="#switches" data-switches="' + esc(b.id) + '">Switches</a></td></tr>').join("") + "</table></div>"
+				: '<p class="dim">Nothing in the library yet. Save the build that is serving now, or copy a build.json + runtime.js pair into <span class="code">client/builds/&lt;name&gt;/</span> and reload this page.</p>') +
+			'<div class="row" style="margin-top:12px"><input id="bname" placeholder="name, e.g. 2022-11" maxlength="80" style="flex:1;min-width:200px"><button class="btn" id="bsave">Save the serving build here</button></div></div>' +
+			'<div class="box" style="margin-top:24px"><h2>Fetch from the Internet Archive</h2>' +
+			'<p class="dim">Looks up the web app as the archive kept it, one capture a month from 2018 on, and adds the one you pick to the library. Each capture is checked when it is imported: early ones are server-rendered pages with no app in them, and are refused. The archive slows down fast clients, so a search takes a few minutes (it covers many pages, and different pages reach back to different years) and an import under a minute. Imported builds are not served until you press Use; they were written for an X that no longer exists, so expect screens that load nothing.</p>' +
+			'<div class="row"><label class="small dim">From <input id="afrom" type="number" min="2018" value="2018" style="width:80px"></label><label class="small dim">to <input id="ato" type="number" min="2018" value="' + new Date().getFullYear() + '" style="width:80px"></label><button class="btn" id="afind">Find captures</button></div>' +
+			'<div id="alist"></div></div>';
+		document.querySelectorAll("[data-switches]").forEach((el) => el.onclick = () => { switchBuild = el.getAttribute("data-switches"); });
+		$("#afind").onclick = () => {
+			$("#afind").disabled = true; $("#afind").textContent = "Searching…";
+			act(async () => {
+				const r = await api("archiveCaptures", { from: Number($("#afrom").value), to: Number($("#ato").value) });
+				const have = new Set(builds.map((b) => b.id));
+				$("#alist").innerHTML = r.captures.length
+					? '<p class="dim small">' + r.captures.length + ' captures. Pages that turn out not to be the app are refused on import.</p><div class="scroll"><table class="table"><tr><th>Captured</th><th>Page</th><th></th></tr>' +
+						r.captures.map((x) => '<tr><td class="code">' + esc(x.date) + '</td><td class="small">' + esc(x.page) + '</td><td><button class="btn" data-imp="' + esc(x.timestamp) + '" data-page="' + esc(x.page) + '">Import</button></td></tr>').join("") + "</table></div>"
+					: '<p class="dim">The archive has no captures in that range.</p>';
+				$("#alist").querySelectorAll("[data-imp]").forEach((el) => el.onclick = () => {
+					el.disabled = true; el.textContent = "Importing…";
+					act(async () => {
+						const d = await api("importArchivedBuild", { timestamp: el.dataset.imp, page: el.dataset.page });
+						notice(d.existing ? "Already in the library as " + d.id : "Added " + d.id + " (" + d.date + ")");
+					}).then(() => { el.disabled = false; el.textContent = "Import"; route(); });
+				});
+			}).then(() => { $("#afind").disabled = false; $("#afind").textContent = "Find captures"; });
+		};
 		$("#ccheck").onclick = () => act(async () => { const r = await api("checkClient"); $("#latest").textContent = short(r.latest) + (r.latest === r.sha ? " (same)" : ""); });
 		$("#cupdate").onclick = async () => {
 			if (!(await ask("Pin the build x.com serves now? Everyone gets it on their next page load."))) return;
@@ -264,6 +297,17 @@ const RENDER = {
 		if ($("#cback")) $("#cback").onclick = async () => {
 			if (!(await ask("Serve the previous build again?"))) return;
 			act(() => api("rollbackClient"), "Back on the previous build").then(route);
+		};
+		document.querySelectorAll("[data-use]").forEach((el) => {
+			el.onclick = async () => {
+				const id = el.getAttribute("data-use");
+				if (!(await ask("Serve the build " + id + "? Everyone gets it on their next page load."))) return;
+				act(() => api("useClientBuild", { id }), "Now serving " + id).then(route);
+			};
+		});
+		$("#bsave").onclick = async () => {
+			const id = ($("#bname").value || "").trim();
+			act(async () => { const r = await api("saveClientBuild", { id }); notice("Saved as " + r.id); }).then(route);
 		};
 	},
 
@@ -546,33 +590,41 @@ const RENDER = {
 	},
 
 	async switches(main) {
-		const { switches } = await api("featureSwitches");
-		const effective = (s) => "override" in s ? s.override : "xitter" in s ? s.xitter : s.build;
-		const from = (s) => "override" in s ? "admin" : "xitter" in s ? "Xitter" : "build";
+		const { builds, sha: serving } = await api("client").then((c) => ({ builds: c.builds || [], sha: c.sha }));
+		if (!builds.some((b) => b.id === switchBuild)) switchBuild = (builds.find((b) => b.sha === serving) || builds[0] || {}).id || "";
+		const { switches } = await api("featureSwitches", switchBuild ? { build: switchBuild } : {});
+		let scope = switchScope;
+		// the value in force for the build being looked at, and where it comes from
+		const eff = (s) => scope === "build" && "buildOverride" in s ? { v: s.buildOverride, from: "this build" } : "override" in s ? { v: s.override, from: scope === "build" ? "all builds" : "admin" } : "xitter" in s ? { v: s.xitter, from: "Xitter" } : { v: s.build, from: "build" };
 		const show = (v) => v === undefined ? "unset" : typeof v === "string" ? v : JSON.stringify(v);
+		const scoped = () => scope === "build" ? { build: switchBuild } : {};
 		main.innerHTML = "<h1>Feature switches</h1>" +
-			'<p class="dim">The X client turns its features on and off with these switches. A value set here wins over the pinned build\'s and Xitter\'s own, for everyone, from their next page load. Many switches need server support Xitter doesn\'t have: turn on something new, then check the app. The instance\'s own features are under Settings.</p>' +
+			'<p class="dim">The X client turns its features on and off with these switches. A value set here wins over the build\'s and Xitter\'s own, from the next page load. Builds don\'t share switch names: pick a build to see its own, and whether a change applies to every build or only to it (a build\'s own value wins). Many switches need server support Xitter doesn\'t have: turn on something new, then check the app. The instance\'s own features are under Settings.</p>' +
+			'<div class="row" style="margin-bottom:8px">' +
+			(builds.length ? '<label class="small dim">Build <select id="sb">' + builds.map((b) => '<option value="' + esc(b.id) + '"' + (b.id === switchBuild ? " selected" : "") + ">" + esc(b.id) + (b.active ? " (serving)" : "") + "</option>").join("") + "</select></label>" : "") +
+			'<label class="small dim">Changes apply to <select id="ss"><option value="all"' + (scope === "all" ? " selected" : "") + '>every build</option><option value="build"' + (scope === "build" ? " selected" : "") + ">only this build</option></select></label></div>" +
 			'<div class="row" style="margin-bottom:12px"><input id="sq" placeholder="Search ' + switches.length + ' switches, e.g. grok, poll, edit_tweet" style="flex:1;min-width:200px">' +
-			'<select id="sf"><option value="">All</option><option value="admin">Set here</option><option value="Xitter">Set by Xitter</option><option value="on">On</option></select></div>' +
+			'<select id="sf"><option value="">All</option><option value="set">Set here</option><option value="Xitter">Set by Xitter</option><option value="on">On</option></select></div>' +
 			'<div id="slist"></div>';
 		const list = $("#slist");
 		const draw = () => {
 			const q = $("#sq").value.trim().toLowerCase(), f = $("#sf").value;
-			const hits = switches.filter((s) => (!q || s.name.includes(q)) && (!f || (f === "on" ? effective(s) === true : from(s) === f)));
+			const hits = switches.filter((s) => (!q || s.name.includes(q)) && (!f || (f === "on" ? eff(s).v === true : f === "set" ? ["admin", "this build", "all builds"].includes(eff(s).from) : eff(s).from === f)));
 			list.innerHTML = (hits.length > 200 ? '<p class="dim small">Showing 200 of ' + hits.length + '; narrow the search.</p>' : "") +
 				'<div class="scroll"><table class="table"><tr><th>Switch</th><th>Value</th><th>From</th><th></th></tr>' +
 				hits.slice(0, 200).map((s) => {
-					const v = effective(s), bool = typeof v === "boolean" || (v === undefined && typeof s.build !== "object");
+					const { v, from } = eff(s), bool = typeof v === "boolean" || (v === undefined && typeof s.build !== "object");
+					const mine = scope === "build" ? "buildOverride" in s : "override" in s;
 					const edit = bool
 						? '<button class="btn' + (v === true ? " primary" : "") + '" data-set="true">On</button> <button class="btn' + (v === false ? " primary" : "") + '" data-set="false">Off</button>'
 						: '<input data-val value="' + esc(typeof v === "string" ? v : JSON.stringify(v ?? "")) + '" style="width:160px"> <button class="btn" data-save>Set</button>';
 					return '<tr data-name="' + esc(s.name) + '"><td class="code small" style="word-break:break-all">' + esc(s.name) + '</td><td class="small" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(show(v)) + '">' + esc(show(v)) +
-						("override" in s ? '<div class="dim small">build: ' + esc(show(s.build)) + "</div>" : "") + '</td><td class="small">' + from(s) + '</td><td style="white-space:nowrap">' + edit +
-						("override" in s ? ' <button class="btn danger" data-reset>Reset</button>' : "") + "</td></tr>";
+						(from !== "build" && from !== "Xitter" ? '<div class="dim small">build: ' + esc(show(s.build)) + "</div>" : "") + '</td><td class="small">' + from + '</td><td style="white-space:nowrap">' + edit +
+						(mine ? ' <button class="btn danger" data-reset>Reset</button>' : "") + "</td></tr>";
 				}).join("") + "</table></div>";
 			list.querySelectorAll("tr[data-name]").forEach((tr) => {
 				const name = tr.dataset.name;
-				const set = (value) => act(() => api("setFeatureSwitch", { name, value }), name + " set").then(route);
+				const set = (value) => act(() => api("setFeatureSwitch", { name, value, ...scoped() }), name + " set").then(route);
 				tr.querySelectorAll("[data-set]").forEach((b) => b.onclick = () => set(b.dataset.set === "true"));
 				const save = tr.querySelector("[data-save]");
 				if (save) save.onclick = () => {
@@ -584,9 +636,11 @@ const RENDER = {
 					set(value);
 				};
 				const reset = tr.querySelector("[data-reset]");
-				if (reset) reset.onclick = () => act(() => api("setFeatureSwitch", { name, reset: true }), name + " reset").then(route);
+				if (reset) reset.onclick = () => act(() => api("setFeatureSwitch", { name, reset: true, ...scoped() }), name + " reset").then(route);
 			});
 		};
+		if ($("#sb")) $("#sb").onchange = () => { switchBuild = $("#sb").value; route(); };
+		$("#ss").onchange = () => { switchScope = scope = $("#ss").value; draw(); };
 		$("#sq").oninput = draw;
 		$("#sf").onchange = draw;
 		draw();
@@ -1027,6 +1081,7 @@ const RENDER = {
 			(admin ? '<button class="btn primary" id="saveFollows">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Name and source</h2><div class="field"><label>Instance name (page titles, text in the app, sign-in page, mail)</label><input id="name" maxlength="30" value="' + esc(s.instance_name) + '"' + dis + "></div>" +
 			'<div class="field"><label>Source code link (AGPL-3.0: shown on the sign-in pages)</label><input id="source" value="' + esc(s.source_url) + '"' + dis + "></div>" +
+			'<label class="row" style="margin:8px 0"><input type="checkbox" id="originalBranding"' + (s.original_branding_for_members ? " checked" : "") + dis + "> Signed-in accounts see the client's own X / Twitter name and logo (signed-out pages keep the name above)</label>" +
 			(admin ? '<button class="btn primary" id="saveName">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Features</h2><p class="dim small">Switched-off features disappear from everyone\'s menus and composer.</p>' +
 			Object.entries(features).map(([k, label]) => '<label class="row" style="margin:6px 0"><input type="checkbox" data-feature="' + k + '"' + (s.features[k] ? " checked" : "") + dis + "> " + esc(label) + "</label>").join("") +
@@ -1108,7 +1163,7 @@ const RENDER = {
 		}, () => { $("#aiPending").textContent = "Couldn't load the imports."; });
 		if (!admin) return;
 		$("#saveFollows").onclick = () => save({ default_follows: $("#follows").value.split(",").map((x) => x.trim()).filter(Boolean) }, "Saved");
-		$("#saveName").onclick = () => save({ instance_name: $("#name").value, source_url: $("#source").value }, "Saved");
+		$("#saveName").onclick = () => save({ instance_name: $("#name").value, source_url: $("#source").value, original_branding_for_members: $("#originalBranding").checked }, "Saved");
 		$("#saveFeatures").onclick = () => {
 			const f = {};
 			main.querySelectorAll("[data-feature]").forEach((c) => f[c.dataset.feature] = c.checked);
@@ -1312,10 +1367,11 @@ async function renderUser(main, id) {
 		'<div class="box"><h2>Standing</h2><p class="dim small">Now: <b>' + esc(u.status) + "</b>" + (u.status_until ? " until " + esc(when(u.status_until)) : "") + "</p>" +
 		'<p class="dim small">Active strikes: <b>' + strikes + "</b>. The next strike " + (next_step < 0 ? "suspends for good" : next_step > 0 ? "suspends for " + next_step + " hours" : "is a warning") + ".</p>" +
 		'<div class="field"><label>Reason (kept in the audit log)</label><input id="reason" placeholder="optional"></div>' +
-		'<div class="field"><label>For</label><select id="for"' + (!can("setTemporaryStatus") || self ? " disabled" : "") + '><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="720">30 days</option></select></div><div class="row">' +
-		[["active", "Reinstate", ""], ["restricted", "Restrict", "Can read, can't post"], ["limited", "Limit", "Only followers see their posts"], ["suspended", "Suspend", "Signed out, hidden everywhere"]]
+		'<div class="field"><label>For</label><select id="for"' + (!can("setTemporaryStatus") || self ? " disabled" : "") + '><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="336">2 weeks</option><option value="720">30 days</option><option value="custom">Custom…</option></select></div>' +
+		'<div class="field" id="customFor" hidden><label>Custom length</label><div class="row"><input id="customAmount" type="number" min="1" value="14" style="max-width:100px"><select id="customUnit"><option value="1">hours</option><option value="24" selected>days</option><option value="168">weeks</option></select></div></div><div class="row">' +
+		[["active", "Reinstate", ""], ["restricted", "Restrict", "Can read, can't post"], ["limited", "Limit", "Only followers see their posts"], ["suspended", "Suspend", "Can\'t use the app, hidden everywhere"]]
 			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("setStatus") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
-		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
+		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: locked out of the app with a notice, and hidden everywhere. Pick a length above, including a custom one.</p></div>' +
 		// access
 		'<div class="box"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") +
 			(canHere("revokeApiTokens") ? '<button class="btn danger" id="revoketokens"' + (u.api_tokens ? "" : " disabled") + ">Revoke API tokens (" + u.api_tokens + ")</button>" : "") + '</div><div id="secret"></div>' +
@@ -1364,9 +1420,14 @@ async function renderUser(main, id) {
 		if (!(await ask("Take off @" + u.screen_name + "'s profile decor?"))) return;
 		act(() => api("resetDecor", { id }), "Decor reset").then(again);
 	};
+	$("#for").onchange = () => { $("#customFor").hidden = $("#for").value !== "custom"; };
 	main.querySelectorAll("[data-status]").forEach((b) => b.onclick = async () => {
 		if (b.dataset.status === "suspended" && !(await ask("Suspend @" + u.screen_name + "?"))) return;
-		const hours = $("#for").value;
+		let hours = $("#for").value;
+		if (hours === "custom") {
+			hours = String(Math.round(Number($("#customAmount").value) * Number($("#customUnit").value)));
+			if (!(Number(hours) >= 1 && Number(hours) <= 8760)) return notice("Choose between 1 hour and 365 days.", true);
+		}
 		act(() => hours && b.dataset.status !== "active"
 			? api("setTemporaryStatus", { id, status: b.dataset.status, hours, reason: $("#reason").value })
 			: api("setStatus", { id, status: b.dataset.status, reason: $("#reason").value }), "Standing changed").then(again);

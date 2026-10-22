@@ -80,6 +80,52 @@ export async function handleLogin(req: Request): Promise<Response> {
 	return signedIn(session);
 }
 
+// A plain sign-in form. The 2026 client signs in inside X's own dialog, but an
+// archived build (Admin > Client, "form login") sends "Log in" to
+// /i/flow/login, which used to bounce back to "/" and loop. This page answers
+// that route and GET /login. POST /login already existed for scripts.
+export function loginPage(message = "", status = 200): Response {
+	return html(
+		layout(
+			"Log in",
+			`<form method="post" action="/login">
+	<img class="logo" src="/public/logo-dark.png" alt="${esc(settings().instance_name)}">
+	<h1>Log in to ${esc(settings().instance_name)}</h1>
+	${message ? `<p class="error">${esc(message)}</p>` : ""}
+	<label for="username">Username</label>
+	<input id="username" name="username" autocomplete="username" autocapitalize="none" required autofocus>
+	<label for="password">Password</label>
+	<input id="password" name="password" type="password" autocomplete="current-password" required>
+	<button>Log in</button>
+	<p class="alt">Sign-up on this instance is invite-only; an admin makes accounts.</p>
+</form>`,
+		),
+		status,
+	);
+}
+
+// The form's POST: handleLogin's plain-text answer replaced by the page
+export async function loginForm(req: Request): Promise<Response> {
+	const answer = await handleLogin(req);
+	if (answer.status === 303) return answer;
+	if (answer.status === 429) return loginPage("Too many tries. Wait a few minutes.", 429);
+	return loginPage("Wrong username or password.", 401);
+}
+
+// An archived client's "Sign up" goes to /i/flow/signup; sign-up here is invite-only
+export function signupPage(): Response {
+	return html(
+		layout(
+			"Sign up",
+			`<form>
+	<img class="logo" src="/public/logo-dark.png" alt="${esc(settings().instance_name)}">
+	<h1>Sign-up is invite-only</h1>
+	<p class="alt">Ask an admin of ${esc(settings().instance_name)} for an invite code, or have them make the account for you. If you already have one, <a href="/login">log in</a>.</p>
+</form>`,
+		),
+	);
+}
+
 // shown while an admin has maintenance mode on: to signed-in accounts, and to
 // guests, who get a way to the sign-in form so staff can still get in
 export function maintenancePage(staffLink = false): Response {
@@ -94,6 +140,60 @@ export function maintenancePage(staffLink = false): Response {
 		),
 		503,
 	);
+}
+
+// X's own suspension notice: a block at the top of the timeline, under the
+// header, not a dialog. The account stays signed in and can still sign out
+// from the account menu. It is only inserted on the home timeline
+// (/ and /home) and removed again on any other page.
+export function suspendedBanner(until: Date | null, dark = true, brand = "X"): string {
+	const rules = `<a href="/rules">${esc(brand)} Rules</a>`;
+	const appeal = `<a href="/appeal">submit an appeal</a>`;
+	const body = until
+		? `After careful review, we determined your account broke the ${rules}. Your account is suspended until ${esc(until.toUTCString())}. While it’s suspended, you can’t post, Repost, or Like content. If you think we got this wrong, you can ${appeal}.`
+		: `After careful review, we determined your account broke the ${rules}. Your account is permanently in read-only mode, which means you can’t post, Repost, or Like content. You won’t be able to create new accounts. If you think we got this wrong, you can ${appeal}.`;
+	return `<style>
+#xitter-suspended{box-sizing:border-box;padding:16px;border-bottom:1px solid rgba(127,127,127,.35);background:transparent;color:#0f1419;font-family:TwitterChirp,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;text-align:left}
+#xitter-suspended h1{margin:0 0 8px;font-size:31px;line-height:36px;font-weight:800;letter-spacing:-.02em}
+#xitter-suspended p{margin:0;font-size:15px;line-height:20px;font-weight:400;color:#536471}
+#xitter-suspended a{color:#1d9bf0;text-decoration:none}
+#xitter-suspended a:hover{text-decoration:underline}
+#xitter-suspended.xitter-suspended-dark{color:#e7e9ea}
+#xitter-suspended.xitter-suspended-dark p{color:#71767b}
+html[data-xitter-theme] #xitter-suspended{color:var(--xt-text)}
+html[data-xitter-theme] #xitter-suspended p{color:var(--xt-secondary)}
+html[data-xitter-theme] #xitter-suspended a{color:var(--xt-link)}
+@media (max-width:500px){#xitter-suspended{text-align:center}#xitter-suspended h1{font-size:23px;line-height:28px}}
+</style>
+<div id="xitter-suspended" class="${dark ? "xitter-suspended-dark" : ""}" role="status" hidden><h1>Your account is suspended</h1><p>${body}</p></div>
+<script>(function(){
+var box=document.getElementById("xitter-suspended");
+if(!box)return;
+function tone(from){
+	for(var n=from;n;n=n.parentElement){
+		var m=/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?/.exec(getComputedStyle(n).backgroundColor);
+		if(m&&(m[4]===undefined||+m[4]>0.5)){box.classList.toggle("xitter-suspended-dark",(+m[1]*299+ +m[2]*587+ +m[3]*114)/1000<128);return;}
+	}
+}
+function home(){var p=location.pathname;return p==="/"||p==="/home";}
+function put(){
+	if(!home()){box.hidden=true;if(box.parentNode)box.parentNode.removeChild(box);return false;}
+	var col=document.querySelector('[data-testid="primaryColumn"]');
+	if(!col)return false;
+	var tl=col.querySelector('[aria-label^="Timeline:"]');
+	if(!tl||!tl.parentNode)return false;
+	tone(col);
+	var parent=tl.parentNode;
+	if(box.parentNode===parent&&box.nextSibling===tl){box.hidden=false;return true;}
+	parent.insertBefore(box,tl);
+	box.hidden=false;
+	return true;
+}
+function schedule(){if(!schedule.pending){schedule.pending=true;requestAnimationFrame(function(){schedule.pending=false;put();});}}
+var root=document.getElementById("react-root")||document.body;
+new MutationObserver(schedule).observe(root,{childList:true,subtree:true});
+put();
+})();</script>`;
 }
 
 // the instance's rules, as written in the admin panel: blank lines split paragraphs
