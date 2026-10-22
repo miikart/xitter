@@ -138,8 +138,10 @@ export function patchText(text: string, chat = false): string {
 const MAX_PATCH_CACHE_BYTES = 64 * 1024 * 1024;
 const cache = new Map<string, Buffer>();
 let cacheBytes = 0;
-export function cachedPatch(key: string): Buffer | undefined {
-	const slot = key.endsWith(".js") ? `${key}\0${settings().instance_name}` : key;
+// `original`: the client's own brand, so its files keep their "X" (and are cached apart)
+const slotOf = (key: string, original: boolean) => (key.endsWith(".js") ? `${key}\0${original ? "\0original" : settings().instance_name}` : key);
+export function cachedPatch(key: string, original = false): Buffer | undefined {
+	const slot = slotOf(key, original);
 	const hit = cache.get(slot);
 	if (hit) {
 		cache.delete(slot);
@@ -153,14 +155,14 @@ export const clearPatchCache = () => {
 };
 
 // the name can change while the server runs, so script files are cached per name
-export function patchFile(key: string, raw: Buffer): Buffer {
+export function patchFile(key: string, raw: Buffer, original = false): Buffer {
 	const js = key.endsWith(".js");
 	const name = settings().instance_name;
-	const slot = js ? `${key}\0${name}` : key;
-	let hit = cachedPatch(key);
+	const slot = slotOf(key, original);
+	let hit = cachedPatch(key, original);
 	if (!hit) {
 		let text = patchText(raw.toString("utf8"), key.startsWith("/x-web/xchat/"));
-		if (js) text = brandText(text, name, !I18N.test(key));
+		if (js && !original) text = brandText(text, name, !I18N.test(key));
 		hit = Buffer.from(text);
 		if (hit.byteLength <= MAX_PATCH_CACHE_BYTES) {
 			while (cacheBytes + hit.byteLength > MAX_PATCH_CACHE_BYTES) {

@@ -32,6 +32,9 @@ export type Feature = keyof typeof FEATURES;
 const DEFAULTS = {
 	signup_mode: "invite" as SignupMode,
 	instance_name: "Xitter",
+	// signed-in accounts see the client's own X / Twitter name and logo instead of
+	// the instance's (for a private or local instance); the signed-out pages keep it
+	original_branding_for_members: false,
 	features: {
 		communities: true,
 		lists: true,
@@ -91,6 +94,8 @@ const DEFAULTS = {
 	// the client's own feature switches, set by an admin (Admin > Feature
 	// switches); they win over the build's values and Xitter's own (shell.ts)
 	switch_overrides: {} as Record<string, unknown>,
+	// the same, for one build only (by sha); they win over switch_overrides
+	build_switch_overrides: {} as Record<string, Record<string, unknown>>,
 	// staff-permissions.ts: what moderators and support may do, where an admin
 	// changed it from the defaults (Admin > Staff permissions)
 	staff_permissions: { moderator: {} as Record<string, boolean>, support: {} as Record<string, boolean> },

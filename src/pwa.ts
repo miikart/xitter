@@ -5,6 +5,7 @@
 // Push itself is push.ts. On iPhone and iPad it only works once the page is
 // installed to the home screen, which is what the manifest makes possible.
 
+import { loadBuild } from "./build";
 import { settings } from "./settings";
 
 const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -13,8 +14,24 @@ const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 // to any shape; replaceable in the admin panel (branding.ts, slot app-icon).
 const ICON = "/public/app-icon.png";
 
-export function manifest(): Response {
-	const name = settings().instance_name;
+// What a signed-in account sees under "Admin > Settings: client's own X / Twitter
+// name and logo": "twitter" for the archived builds before the rename, else "x".
+export type Brand = "x" | "twitter";
+export function originalBrand(signedIn: boolean): Brand | null {
+	if (!signedIn || !settings().original_branding_for_members) return null;
+	const build = loadBuild()?.build;
+	return build?.featureSwitch.flat || build?.legacy_login ? "twitter" : "x";
+}
+export const BRAND_NAME: Record<Brand, string> = { x: "X", twitter: "Twitter" };
+// the generated marks in public/: the mark on black (X) or on blue (the bird)
+export const brandIcons = (brand: Brand | null) => ({
+	icon: brand ? `/public/original-${brand}-favicon.png` : "/public/favicon.png",
+	app: brand ? `/public/original-${brand}-app-icon.png` : ICON,
+});
+
+export function manifest(brand: Brand | null = null): Response {
+	const name = brand ? BRAND_NAME[brand] : settings().instance_name;
+	const ICON = brandIcons(brand).app;
 	const body = {
 		id: "/",
 		name,
@@ -22,8 +39,8 @@ export function manifest(): Response {
 		start_url: "/home",
 		scope: "/",
 		display: "standalone",
-		background_color: "#000000",
-		theme_color: "#000000",
+		background_color: brand === "twitter" ? "#ffffff" : "#000000",
+		theme_color: brand === "twitter" ? "#ffffff" : "#000000",
 		icons: [
 			{ src: ICON, sizes: "512x512", purpose: "any" },
 			{ src: ICON, sizes: "512x512", purpose: "maskable" },
@@ -41,9 +58,10 @@ export function manifest(): Response {
 }
 
 // for the <head> of every page that can be opened from the installed app
-export const pwaHead = () => {
-	const name = esc(settings().instance_name);
-	return `<link rel="manifest" href="/manifest.json" /><link rel="apple-touch-icon" href="${ICON}" />
+export const pwaHead = (brand: Brand | null = null) => {
+	const name = esc(brand ? BRAND_NAME[brand] : settings().instance_name);
+	// the manifest is fetched without cookies unless asked to, and it depends on the account
+	return `<link rel="manifest" href="/manifest.json"${brand ? ' crossorigin="use-credentials"' : ""} /><link rel="apple-touch-icon" href="${brandIcons(brand).app}" />
 <meta name="mobile-web-app-capable" content="yes" /><meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" /><meta name="apple-mobile-web-app-title" content="${name}" />`;
 };

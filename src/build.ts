@@ -9,10 +9,14 @@ export type Build = {
 	sha: string;
 	// CDN paths of the entry scripts, in page order (vendor, i18n, main)
 	scripts: string[];
-	featureSwitch: { defaultConfig: Record<string, unknown>; config: Record<string, unknown>; featureSetToken: string; settingsVersion: string };
+	featureSwitch: { defaultConfig: Record<string, unknown>; config: Record<string, unknown>; featureSetToken: string; settingsVersion: string; flat?: boolean };
 	// page metadata minus anything about the account it was taken from
 	meta: Record<string, unknown>;
 	fetchedAt: string;
+	// an archived build whose own sign-in dialog can't complete against this
+	// server (the 2022 client sends people to /i/flow/login): guests get the
+	// plain form at /login instead. Set by scripts/install-build.ts.
+	legacy_login?: boolean;
 };
 
 export const BUILD_FILE = join(CLIENT_DIR, "build.json");

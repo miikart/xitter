@@ -765,6 +765,10 @@ const ACTIONS: Record<string, Action> = {
 				await setSetting("instance_name", name);
 				changed.push("instance_name");
 			}
+			if (typeof b.original_branding_for_members === "boolean") {
+				await setSetting("original_branding_for_members", b.original_branding_for_members);
+				changed.push("original_branding_for_members");
+			}
 			if (b.features && typeof b.features === "object") {
 				const next = { ...s.features };
 				for (const k of Object.keys(FEATURES) as Feature[]) if (typeof b.features[k] === "boolean") next[k] = b.features[k];
