@@ -50,6 +50,7 @@ function loadSecrets(): Secrets {
 	return s;
 }
 const secrets = loadSecrets();
+export const tokenKey = secrets.tokenKey;
 export const JUICEBOX = {
 	// where this instance reaches the realm; browsers go through /juicebox
 	url: (process.env.JUICEBOX_URL ?? "http://localhost:8580").replace(/\/$/, ""),

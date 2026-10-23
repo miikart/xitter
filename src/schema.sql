@@ -1581,3 +1581,27 @@ alter table migration_objects add column if not exists created_at timestamptz no
 -- where an account went, as handle@instance; set by the new instance when the import finished
 alter table users add column if not exists moved_to text;
 alter table users add column if not exists moved_at timestamptz;
+-- direct messages as the 2013 mobile apps send them: plain text, one row per message
+create table if not exists classic_dms (
+	id bigint primary key default (floor(extract(epoch from clock_timestamp()) * 1000000)::bigint * 1000 + floor(random() * 1000)::bigint),
+	sender_id bigint not null references users (id) on delete cascade,
+	recipient_id bigint not null references users (id) on delete cascade,
+	text text not null,
+	created_at timestamptz not null default now(),
+	sender_deleted boolean not null default false,
+	recipient_deleted boolean not null default false
+);
+create index if not exists classic_dms_recipient_idx on classic_dms (recipient_id, id desc);
+create index if not exists classic_dms_sender_idx on classic_dms (sender_id, id desc);
+-- searches kept from the 2013 mobile apps' search box
+create table if not exists classic_saved_searches (
+	id bigint primary key default (floor(extract(epoch from clock_timestamp()) * 1000000)::bigint * 1000 + floor(random() * 1000)::bigint),
+	user_id bigint not null references users (id) on delete cascade,
+	query text not null,
+	created_at timestamptz not null default now(),
+	unique (user_id, query)
+);
+
+-- Dates staff show instead of the real ones (admin panel): "Joined" and a post's time
+alter table users add column if not exists shown_created_at timestamptz;
+alter table posts add column if not exists shown_at timestamptz;

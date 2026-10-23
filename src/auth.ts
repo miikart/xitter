@@ -2,6 +2,7 @@ import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { newId } from "./ids";
 import { expireSanctions } from "./moderation";
+import { oauth1Token } from "./oauth1-header";
 
 export type User = {
 	id: string;
@@ -159,7 +160,7 @@ export function parseCookies(req: Request): Record<string, string> {
 
 import { requestCountry } from "./login-history";
 
-const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, u.created_at, u.instance,
+const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, coalesce(u.shown_created_at, u.created_at) as created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
@@ -175,7 +176,7 @@ const MAX_TOUCHED = 50_000;
 const touched = new Map<string, number>();
 
 async function loadViewer(req: Request): Promise<Viewer | undefined> {
-	const token = parseCookies(req).auth_token;
+	const token = parseCookies(req).auth_token ?? oauth1Token(req);
 	if (!token) return undefined;
 	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token, s.superadmin
 		from sessions s join users u on u.id = s.user_id
@@ -204,6 +205,9 @@ export function getViewer(req: Request): Promise<Viewer | undefined> {
 	viewers.set(req, loading);
 	return loading;
 }
+
+// a request signed with an OAuth 1.0a token, not carried by a cookie: no csrf header to expect
+export const signedByOAuth1 = (req: Request) => !parseCookies(req).auth_token && !!oauth1Token(req);
 
 export function csrfCookie(csrf: string): string {
 	return `ct0=${csrf}; Path=/; Max-Age=${YEAR}; SameSite=Lax${SECURE}`;

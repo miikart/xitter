@@ -33,7 +33,7 @@ export const PERMISSIONS: Record<string, Permission> = {
 	// whoever resets a password sees the new one and can sign in as the account
 	passwords: { group: "Accounts", label: "Reset passwords (they see the new password, so they can sign in as the account)", role: "admin", actions: ["resetPassword"] },
 	sessions: { group: "Accounts", label: "Sign accounts out and revoke their API tokens", role: "support", actions: ["signOut", "revokeSession", "revokeApiTokens"] },
-	profiles: { group: "Accounts", label: "Edit profiles and the counts shown on profiles and posts", role: "admin", actions: ["updateUser", "setUserCounts", "setPostCounts"] },
+	profiles: { group: "Accounts", label: "Edit profiles and the counts shown on profiles and posts", role: "admin", actions: ["updateUser", "setUserCounts", "setPostCounts", "setJoinDate", "setPostDate"] },
 	account_badges: { group: "Accounts", label: "Give badges, labels and flags", role: "admin", actions: ["setBadge", "setTranslator", "setFlag", "setBadges", "setProfileLabel", "setOrgBadge"] },
 	notes_access: { group: "Accounts", label: "Give Community Notes writing access", role: "admin", actions: ["setNotesAccess"] },
 	delete_accounts: { group: "Accounts", label: "Delete accounts", role: "admin", actions: ["deleteUser"] },

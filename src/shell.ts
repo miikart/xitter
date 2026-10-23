@@ -21,7 +21,6 @@ import { clientLook, themeForClient, type Look } from "./themes/validate";
 import { NOTICE_SCRIPT } from "./automod-notice";
 import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-picker";
 import { PRONOUNS_CSS, PRONOUNS_SCRIPT, pronounsData } from "./pronouns";
-import { PUBLIC_ORIGIN } from "./config";
 import { legacyUser } from "./model";
 import { patchText } from "./patch";
 import { BRAND_NAME, PWA_SCRIPT, brandIcons, originalBrand, pwaHead } from "./pwa";
@@ -345,7 +344,7 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 	const chatBuild = build.meta.xchatEmbedBuild;
 	const meta = { ...(build.featureSwitch.flat ? { isRTL: false, isFromDynamicRenderer: false } : {}), ...build.meta, ...(typeof chatBuild === "string" ? { xchatEmbedBuild: patchText(chatBuild) } : {}), sha: build.sha, isLoggedIn: !!user, userId: user?.id ?? null, hasMultiAccountCookie: !!user && multi, serverDate: Date.now() };
 	const scripts = build.scripts
-		.map((p) => `<script defer charset="utf-8" crossorigin="anonymous" src="${PUBLIC_ORIGIN}/abs${p}"></script>`)
+		.map((p) => `<script defer charset="utf-8" crossorigin="anonymous" src="/abs${p}"></script>`)
 		.join("");
 	return `<!DOCTYPE html><html dir="ltr" lang="en"${theme ? ` data-xitter-theme="${esc(theme.id)}"` : ""} data-xitter-accent="${esc(accent.kind === "named" ? accent.id : "custom")}"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0,viewport-fit=cover" />

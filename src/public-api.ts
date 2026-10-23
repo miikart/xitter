@@ -55,7 +55,7 @@ async function tokenViewer(req: Request): Promise<{ viewer: Viewer; scope: strin
 	const token = /^Bearer\s+(xit_[0-9a-f]{48})$/i.exec(req.headers.get("authorization") ?? "")?.[1];
 	if (!token) return undefined;
 	const [row] = await sql`
-		select u.id::text, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.status, u.role, u.protected, u.language, u.created_at,
+		select u.id::text, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.status, u.role, u.protected, u.language, coalesce(u.shown_created_at, u.created_at) as created_at,
 			t.scope, t.id::text as token_id, t.last_used_at, c.name as app_name
 		from api_tokens t join users u on u.id = t.user_id left join oauth_clients c on c.id = t.client_id
 		where t.token_hash = ${hash(token)} and u.status <> 'suspended' and u.deactivated_at is null

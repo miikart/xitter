@@ -1,6 +1,7 @@
 // Builds the objects the client expects. Field sets follow the captured
 // responses; fields for features we do not have are constants.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { bioEntities, urlEntities as linkEntities } from "./links";
@@ -31,6 +32,24 @@ export function noteText(text: string) {
 
 const DEFAULT_AVATAR = `${PUBLIC_ORIGIN}/abs/sticky/default_profile_images/default_profile_normal.png`;
 // an account's picture as a full URL, X's default one when it has none
+// The classic Twitter egg, one of the seven archived by account, for accounts without a picture.
+// Only the old mobile apps (Android before 6.40.0, iPhone before 7.0) show it; a request
+// from one runs inside withEggs(), everything else keeps X's default picture.
+const eggs = new AsyncLocalStorage<boolean>();
+export const withEggs = <T>(ua: string, fn: () => T): T => eggs.run(wantsEggs(ua), fn);
+export function wantsEggs(ua: string) {
+	const m = /^Twitter(?: for |-|)(Android|iPhone|iPad|iPod)\/(\d+)\.(\d+)/i.exec(ua);
+	if (!m) return false;
+	const major = Number(m[2]), minor = Number(m[3]);
+	return /^android$/i.test(m[1]) ? major < 6 || (major === 6 && minor < 40) : major < 7;
+}
+// the old apps know only `verified`, and show it for any badge
+export const oldApp = () => !!eggs.getStore();
+export const eggUrl = (id: string | number | bigint) => `${PUBLIC_ORIGIN}/public/default_profile_${Number(BigInt(id) % 7n)}_normal.png`;
+const isDefaultAvatar = (url: string | null | undefined) => !url || url.includes("default_profile_images");
+export const eggAvatar = (url: string | null | undefined, id: string | number | bigint) =>
+	isDefaultAvatar(url) ? (eggs.getStore() ? eggUrl(id) : url || DEFAULT_AVATAR) : url!;
+
 export const avatarUrl = (url: string | null | undefined) => absolute(url ?? null) ?? DEFAULT_AVATAR;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -324,9 +343,9 @@ export function legacyUser(u: User) {
 		super_followed_by: false,
 		super_following: false,
 		verified_user_profiles: { super_follows_user_profile: { is_active: false } },
-		verified: false,
+		verified: oldApp() && isVerified(u),
 		protected: !!u.protected,
-		profile_image_url_https: absolute(u.avatar_url) ?? DEFAULT_AVATAR,
+		profile_image_url_https: eggAvatar(absolute(u.avatar_url), u.id),
 		...(u.banner_url ? { profile_banner_url: absolute(u.banner_url) } : {}),
 		can_media_tag: true,
 		// with a default avatar and no bio or banner the client offers its "Set up

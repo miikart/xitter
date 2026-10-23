@@ -19,8 +19,9 @@ import { PollError, createCard, vote } from "./polls";
 import { placeById, searchPlaces } from "./places";
 import { reportFlow } from "./reports";
 import { settingsFor } from "./shell";
+import { restClassicRoute, uploadPhoto } from "./rest-classic";
 import { restLegacyRoute } from "./rest-legacy";
-import { bootEndpoint, homeTimeline, restStatusRoute, restTimelineRoute } from "./rest-timeline";
+import { bootEndpoint, homeConversations, homeStatuses, homeTimeline, restStatusRoute, restTimelineRoute } from "./rest-timeline";
 import { changeCountryFlow } from "./country-setting";
 import { hashtagsLike, searchUsers } from "./search";
 import { STAFF_HANDLE } from "./invites";
@@ -77,7 +78,17 @@ const changedUser = async (viewer: Viewer) => Response.json(legacyUser((await us
 async function profileRoute(path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
 	const m = /^\/1\.1\/account\/(update_profile|update_profile_image|update_profile_banner|remove_profile_banner|update_flag|update_pronouns)\.json$/.exec(path);
 	if (!m || req.method !== "POST") return undefined;
+	// the 2013 apps send the picture itself, as the "image" or "banner" part
+	const sent = m[1] === "update_profile_image" || m[1] === "update_profile_banner" ? await req.clone().formData().catch(() => undefined) : undefined;
+	const file = sent?.get(m[1] === "update_profile_image" ? "image" : "banner");
 	const f = await form(req);
+	if (file && typeof file !== "string" && file.size) {
+		try {
+			f.media_id = await uploadPhoto(viewer, file);
+		} catch (e) {
+			return profileError(e instanceof Error ? e.message : "That picture could not be uploaded.");
+		}
+	}
 
 	if (m[1] === "update_profile") {
 		const limits: Record<string, [string, number]> = { name: ["name", 50], description: ["bio", 160], location: ["location", 30], url: ["website", 100] };
@@ -196,7 +207,9 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 	// web clients before November 2022 (rest-timeline.ts)
 	if (method === "GET" && (path === "/2/timeline/home.json" || path === "/2/timeline/home_latest.json"))
 		return homeTimeline(viewer, new URL(req.url).searchParams, path.endsWith("_latest.json"));
-	const legacy = (await restTimelineRoute(method, path, viewer, req)) ?? (await restStatusRoute(method, path, viewer, req)) ?? (await restLegacyRoute(method, path, viewer, req));
+	if (method === "GET" && path === "/1.1/statuses/home_timeline.json") return homeStatuses(viewer, new URL(req.url).searchParams);
+	if (method === "GET" && path === "/1.1/timeline/home.json") return homeConversations(viewer, new URL(req.url).searchParams);
+	const legacy = (await restTimelineRoute(method, path, viewer, req)) ?? (await restStatusRoute(method, path, viewer, req)) ?? (await restClassicRoute(method, path, viewer, req)) ?? (await restLegacyRoute(method, path, viewer, req));
 	if (legacy) return legacy;
 	// the Branch tracking SDK the 2019-2022 clients start: off, so it never loads
 	if (method === "POST" && path === "/1.1/branch/init.json") return Response.json({ is_loading_enabled: false, is_tracking_enabled: false });
@@ -239,8 +252,9 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 	if (profile) return profile;
 	const friendship = /^\/1\.1\/friendships\/(create|destroy)\.json$/.exec(path);
 	if (friendship && method === "POST") {
-		const form = await req.formData().catch(() => undefined);
-		const target = form?.get("user_id");
+		// the old apps name the account by user_id or screen_name, in the body or the address
+		const f = { ...Object.fromEntries(new URL(req.url).searchParams), ...(await form(req)) };
+		const target = isId(f.user_id) ? f.user_id : f.screen_name ? (await userByName(viewer.id, f.screen_name.replace(/^@/, "")))?.id : undefined;
 		if (!isId(target)) return Response.json({ errors: [{ code: 50, message: "User not found." }] }, { status: 404 });
 		await setFollow(viewer.id, target, friendship[1] === "create");
 		const user = await userById(viewer.id, target);

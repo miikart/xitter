@@ -1,4 +1,6 @@
-import { type Viewer, clearedCookies, getViewer, logout, parseCookies, csrfCookie } from "./auth";
+import { withEggs } from "./model";
+import { mediaToken, mediaTokenUser } from "./media-token";
+import { type Viewer, viewerById, clearedCookies, getViewer, logout, parseCookies, csrfCookie, signedByOAuth1 } from "./auth";
 import { getClientFile, getClientFilePath } from "./client-cache";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
@@ -50,6 +52,7 @@ import { stickerImage, stickerPacks } from "./stickers";
 import { apiTokensRoute, publicApi } from "./public-api";
 import { connectedAppsRoute, developerAppsRoute, oauthAppIcon, oauthAuthorize, oauthToken } from "./oauth";
 import { authorizationServerMetadata } from "./oauth-metadata";
+import { oauth1Route } from "./oauth1";
 import { apiDocsPage } from "./api-docs";
 import { hashflagAsset } from "./hashflags";
 import { startMailDigests } from "./mail-digest";
@@ -118,7 +121,7 @@ async function servePublic(p: string): Promise<Response> {
 	return new Response(file, { headers: { "cache-control": "no-cache" } });
 }
 
-const API_PREFIX = /^\/(i\/api\/|i\/jfapi\/|i\/media\/|1\.1\/|2\/|v2\/|graphql\/|fleets\/|live_pipeline\/)/;
+const API_PREFIX = /^\/(i\/api\/|i\/jfapi\/|i\/media\/|1\.1\/|1\/|2\/|v2\/|graphql\/|fleets\/|live_pipeline\/)/;
 // calls no handler exists for yet, most frequent first
 const unknown = new Map<string, number>();
 const MAX_UNKNOWN_PATHS = 1000;
@@ -217,7 +220,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	const gql = parts.indexOf("graphql");
 	const operation = gql >= 0 ? parts[parts.length - 1] : undefined;
 	if (req.method === "POST" && path === "/1.1/graphql/app_context.json") return new Response(null, { status: 204 });
-	if ((req.method !== "GET" || operation) && req.headers.get("x-csrf-token") !== viewer.csrf)
+	if ((req.method !== "GET" || operation) && !signedByOAuth1(req) && req.headers.get("x-csrf-token") !== viewer.csrf)
 		return apiError(403, 353, "This request requires a matching csrf cookie and header.");
 	if (req.method === "GET" && operation && isMutation(operation)) return apiError(405, 144, "Use POST for this operation.");
 	// a delegate switched into another account (delegation.ts); the client sends
@@ -276,8 +279,8 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	} else if (path === "/live_pipeline/events") {
 		return livePipeline();
 	}
-	const rest = await restRoute(req.method, path, viewer, req);
-	if (rest) return rest;
+	const rest = await withEggs(req.headers.get("user-agent") ?? "", () => restRoute(req.method, path, viewer, req));
+	if (rest) return legacyIds(req, rest, viewer);
 
 	const key = `${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`;
 	if (unknown.has(key)) unknown.set(key, unknown.get(key)! + 1);
@@ -285,6 +288,25 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	else unknown.set("(other paths)", (unknown.get("(other paths)") ?? 0) + 1);
 	console.log(`unhandled ${key}`);
 	return Response.json(gql >= 0 ? { data: {} } : {});
+}
+
+// The 2011-2016 apps read each id as a number beside its id_str. It is spliced in as
+// text: ids do not fit a double. Only they get it, since a browser would round them.
+const LEGACY_CLIENT = /^Twitter(?:Android|-iPhone|-iPad|-iPod)\b|^Twitter for (?:iPhone|iPad|Android)\b/i;
+async function legacyIds(req: Request, res: Response, viewer: Viewer | undefined): Promise<Response> {
+	if (!LEGACY_CLIENT.test(req.headers.get("user-agent") ?? "") || !/json/.test(res.headers.get("content-type") ?? "")) return res;
+	let body = (await res.text()).replace(/(?<!"id":\d+,)"id_str":"(\d+)"/g, '"id":$1,"id_str":"$1"');
+	// links point back at the address the app used: it cannot reach, or trust, the public https one
+	const host = req.headers.get("host");
+	if (host) body = body.replaceAll(PUBLIC_ORIGIN, `${req.headers.get("x-forwarded-proto") === "https" ? "https" : "http"}://${host}`);
+	const headers = new Headers(res.headers);
+	headers.delete("content-length");
+	// the app loads pictures without signing in
+	if (viewer) {
+		const mt = mediaToken(viewer.id);
+		body = body.replace(/(\/media\/[\w\/.-]+)(?=")/g, `$1?mt=${mt}`);
+	}
+	return new Response(body, { status: res.status, headers });
 }
 
 await migrate();
@@ -351,7 +373,17 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (site ? site !== "same-origin" && site !== "none" : origin && origin !== PUBLIC_ORIGIN && origin !== url.origin)
 			return new Response("This request came from another site.", { status: 403 });
 	}
-	if (p.startsWith("/abs/")) return serveClient(req, p);
+	if (p.startsWith("/abs/")) {
+		// the client's scripts and chunks are public files; the instance answers on more than one
+		// host (www and the bare name), and a page on one loads them from the other
+		const r = await serveClient(req, p);
+		if (!r.headers.has("access-control-allow-origin")) {
+			const h = new Headers(r.headers);
+			h.set("access-control-allow-origin", "*");
+			return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
+		}
+		return r;
+	}
 	if (p === "/.well-known/xitter" || p.startsWith("/federation/v1/")) {
 		const answer = await federationRoute(req, url);
 		if (answer) return answer;
@@ -379,6 +411,9 @@ async function route(req: Request): Promise<Response | undefined> {
 	// the public API signs in with its own tokens, never cookies
 	if (p.startsWith("/api/v1/") || p === "/api/v1") return publicApi(req, url);
 	if (p === "/oauth/token") return oauthToken(req);
+	// the old mobile clients: OAuth 1.0a and xAuth
+	const classic = await oauth1Route(req, url);
+	if (classic) return classic;
 	const appIcon = /^\/oauth\/apps\/(\d{1,19})\/icon$/.exec(p);
 	if (appIcon && req.method === "GET") return oauthAppIcon(appIcon[1]!);
 	if (p === "/.well-known/oauth-authorization-server") return authorizationServerMetadata();
@@ -500,7 +535,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	// the frame X's client opens for a player card (YouTube links)
 	if (isPlayerPage(p)) return viewer ? playerPage(p, viewer.id) : new Response("not found", { status: 404 });
 	// uploads stay inside the instance: only signed-in users get them
-	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p, viewer) : new Response("not found", { status: 404 });
+	if (p.startsWith("/media/")) {
+		if (viewer) return serveMedia(req, p, viewer);
+		const holder = mediaTokenUser((url.searchParams.get("mt") ?? "").split("/")[0]);
+		const as = holder && (await viewerById(holder));
+		return as ? serveMedia(req, p, { ...as, csrf: "", token: "" }) : new Response("not found", { status: 404 });
+	}
 	// the admin panel: staff only; everyone else gets the client's not-found page
 	if (p.startsWith("/admin/api/")) return adminApi(req, p.slice("/admin/api/".length), viewer);
 	if (p === "/admin/flags.json" && viewer?.role) return Response.json(flagPickerData(null).flags);

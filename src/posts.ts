@@ -29,7 +29,7 @@ const SUSPENDED = sql`(select id from users where status = 'suspended' or instan
 
 // every post query starts from this; callers append where/order/limit
 const select = (viewerId: string) => sql`
-	select p.id, p.text, p.conversation_card, p.conversation_card_post_id::text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, p.created_at, p.source, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
+	select p.id, p.text, p.conversation_card, p.conversation_card_post_id::text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, coalesce(p.shown_at, p.created_at) as created_at, p.source, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
 		exists (select 1 from posts r where r.id = p.conversation_id and r.reply_policy is not null and r.user_id <> ${viewerId}::bigint and not (
 			(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${viewerId}::bigint))
 			or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${viewerId}::bigint))

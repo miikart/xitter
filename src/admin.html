@@ -185,6 +185,8 @@ async function act(fn, done) {
 
 // X's labels under a post (model.ts NOTICE_TYPES)
 const NOTICE_LABELS = { Fosnr: "Visibility limited", Misleading: "Misleading", StayInformed: "Stay informed", GetTheLatest: "Get the latest", GovernmentRequested: "Legally required notice" };
+const localInput = (d) => d ? new Date(new Date(d).getTime() - new Date(d).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "";
+const isoInput = (v) => v ? new Date(v).toISOString() : "";
 const when = (d) => d ? new Date(d).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never";
 const duration = (s) => s < 3600 ? Math.floor(s / 60) + " min" : s < 172800 ? Math.floor(s / 3600) + " h" : Math.floor(s / 86400) + " days";
 // "Edge on Windows" from a user agent
@@ -1016,7 +1018,8 @@ const RENDER = {
 				'<p class="dim small">Visibility limited also keeps the post out of For you and search.</p><button class="btn primary" data-save-notice>Save label</button></div>' : "") +
 				(can("setPostCounts") ? '<div><b>Shown counts</b><p class="dim small">Blank shows the real number. Only the number changes, not who liked or reposted.</p><div class="row" style="flex-wrap:wrap">' +
 					["likes", "replies", "reposts", "quotes", "bookmarks", "views"].map((k) => '<label class="small" style="width:30%">' + k + '<input data-k="' + k + '" type="number" min="0" value="' + (c[k] ?? "") + '"></label>').join("") +
-					'</div><button class="btn primary" data-save-counts style="margin-top:8px">Save counts</button></div>' : "") + "</div>";
+					'</div><button class="btn primary" data-save-counts style="margin-top:8px">Save counts</button></div>' : "") +
+				(can("setPostDate") ? '<div><b>Shown date</b><p class="dim small">Blank shows the real one (' + esc(when(p.created_at)) + '). Only the date changes, not the order.</p><input data-k="date" type="datetime-local" value="' + localInput(p.shown_at) + '"> <button class="btn primary" data-save-date>Save date</button></div>' : "") + "</div>";
 		};
 		main.innerHTML = '<h1>Posts</h1><div class="bar"><input id="q" placeholder="Text contains" style="flex:1;min-width:160px"><input id="author" placeholder="@author"></div><p class="dim small" id="total"></p><div id="list" class="scroll"></div>' +
 			'<div class="row" style="margin-top:16px"><button class="btn" id="more" hidden>Show more</button></div>';
@@ -1052,6 +1055,8 @@ const RENDER = {
 				const val = (k) => row.querySelector('[data-k="' + k + '"]').value;
 				const ns = row.querySelector("[data-save-notice]");
 				if (ns) ns.onclick = () => act(() => api("setPostNotice", { id, type: val("type"), text: val("text"), url: val("url") }), "Label saved").then(load);
+				const ds = row.querySelector("[data-save-date]");
+				if (ds) ds.onclick = () => act(() => api("setPostDate", { id, date: isoInput(val("date")) }), "Date saved").then(load);
 				const cs = row.querySelector("[data-save-counts]");
 				if (cs) cs.onclick = () => act(() => api("setPostCounts", { id, counts: Object.fromEntries(["likes", "replies", "reposts", "quotes", "bookmarks", "views"].map((k) => [k, val(k)])) }), "Counts saved").then(load);
 			});
@@ -1407,7 +1412,8 @@ async function renderUser(main, id) {
 		(canHere("updateUser") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
 		(canHere("setUserCounts") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
 			["followers", "following"].map((k) => '<label class="small" style="flex:1">' + k + '<input data-count="' + k + '" type="number" min="0" value="' + ((u.count_overrides || {})[k] ?? "") + '"></label>').join("") +
-			'</div><button class="btn" id="saveCounts" style="margin-top:8px">Save counts</button>' : "") + "</div>" +
+			'</div><button class="btn" id="saveCounts" style="margin-top:8px">Save counts</button>' : "") +
+		(canHere("setJoinDate") ? '<h2 style="margin-top:20px">Shown join date</h2><p class="dim small">Blank shows the real one (' + esc(when(u.created_at)) + '). Only the "Joined" date changes.</p><div class="row"><input id="joinDate" type="datetime-local" value="' + localInput(u.shown_created_at) + '"><button class="btn" id="saveJoin">Save date</button></div>' : "") + "</div>" +
 		// badges
 		'<div class="box"><h2>Badge and flag</h2><div class="field"><label>Verification badge</label><select id="badge"' + (can("setBadge") ? "" : " disabled") + ">" +
 		[["", "none"], ["blue", "blue"], ["business", "gold (organisation)"], ["government", "grey (government organisation)"], ["government_individual", "grey (government official)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.verified_type ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
@@ -1474,6 +1480,7 @@ async function renderUser(main, id) {
 		"<h2>History</h2>" + (log.length ? '<table class="table">' + log.map((e) => '<tr><td class="small dim">' + esc(when(e.created_at)) + "</td><td>" + (e.automatic ? "automod" : "@" + esc(e.actor ?? "?")) + " " + esc(e.action.replace(/_/g, " ")) + '</td><td class="small dim code">' + esc(e.detail ? JSON.stringify(e.detail) : "") + "</td></tr>").join("") + "</table>" : '<div class="empty">No staff actions yet.</div>');
 
 	const again = () => renderUser(main, id);
+	if ($("#saveJoin")) $("#saveJoin").onclick = () => act(() => api("setJoinDate", { id, date: isoInput($("#joinDate").value) }), "Date saved").then(again);
 	if ($("#saveCounts")) $("#saveCounts").onclick = () => act(() => api("setUserCounts", { id, counts: Object.fromEntries([...main.querySelectorAll("[data-count]")].map((el) => [el.dataset.count, el.value])) }), "Counts saved").then(again);
 	if ($("#save")) $("#save").onclick = () => {
 		const body = { id };
@@ -1546,7 +1553,7 @@ async function renderUser(main, id) {
 	}
 	const item = (k) => '<button data-page="' + k + '"><span class="icon">' + PAGES[k].icon + "</span>" + esc(PAGES[k].title) + "</button>";
 	$("#nav").insertAdjacentHTML("beforeend", GROUPS.map(([title, keys]) => {
-		const shown = keys.filter((k) => !PAGES[k].needs || can(PAGES[k].needs));
+		const shown = keys.filter((k) => PAGES[k] && (!PAGES[k].needs || can(PAGES[k].needs)));
 		if (!shown.length) return "";
 		return '<div class="group' + (title ? "" : " solo") + '">' +
 			(title ? '<button class="ghead" aria-expanded="false"><span>' + esc(title) + '</span><span class="icon">expand_more</span></button>' : "") +

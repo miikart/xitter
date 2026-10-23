@@ -5,6 +5,7 @@
 // ranking, filters and cursors are the ones graphql.ts already has.
 
 import type { Viewer } from "./auth";
+import { eggAvatar, oldApp } from "./model";
 import { PostError } from "./posts";
 import { callOperation } from "./graphql";
 
@@ -22,14 +23,15 @@ export function restUser(u: Obj): Obj {
 		location: u.location?.location ?? "",
 		url: u.website?.url || null,
 		protected: !!u.privacy?.protected,
-		verified: false,
+		verified: oldApp() && !!u.is_blue_verified,
 		ext_is_blue_verified: !!u.is_blue_verified,
 		followers_count: u.relationship_counts?.followers ?? 0,
 		friends_count: u.relationship_counts?.following ?? 0,
 		statuses_count: u.tweet_counts?.tweets ?? 0,
 		media_count: u.tweet_counts?.media_tweets ?? 0,
 		favourites_count: u.action_counts?.favorites_count ?? 0,
-		profile_image_url_https: u.avatar?.image_url,
+		profile_image_url_https: eggAvatar(u.avatar?.image_url, u.rest_id),
+		profile_image_url: eggAvatar(u.avatar?.image_url, u.rest_id),
 		...(u.banner?.image_url ? { profile_banner_url: u.banner.image_url } : {}),
 		pinned_tweet_ids_str: u.pinned_items?.tweet_ids_str ?? [],
 		default_profile: false,
@@ -236,7 +238,7 @@ export async function restStatusRoute(method: string, path: string, viewer: View
 	try {
 		if (op === "statuses/lookup") {
 			const found = await Promise.all(id.split(",").filter((x) => /^\d{1,19}$/.test(x)).slice(0, 100).map((x) => status(viewer, x)));
-			return Response.json(found.filter(Boolean));
+			return Response.json(found.filter(Boolean).map(withText));
 		}
 		if (op === "statuses/update") {
 			const media = (q.get("media_ids") ?? "").split(",").filter(Boolean).map((media_id) => ({ media_id, tagged_users: [] }));
@@ -246,14 +248,14 @@ export async function restStatusRoute(method: string, path: string, viewer: View
 				...(q.get("attachment_url") ? { attachment_url: q.get("attachment_url") } : {}),
 				media: { media_entities: media, possibly_sensitive: truthy(q.get("possibly_sensitive")) },
 			});
-			return Response.json(restStatus(out.data.create_tweet.tweet_results.result));
+			return Response.json(withText(restStatus(out.data.create_tweet.tweet_results.result)));
 		}
 		if (!/^\d{1,19}$/.test(id)) return gone("No status found with that ID.", 144, 404);
 		let shown = id;
 		if (op === "statuses/destroy") {
 			const before = await status(viewer, id);
 			await callOperation("DeleteTweet", viewer, { tweet_id: id });
-			return before ? Response.json(before) : gone("No status found with that ID.", 144, 404);
+			return before ? Response.json(withText(before)) : gone("No status found with that ID.", 144, 404);
 		}
 		if (op === "statuses/retweet") {
 			const out: Obj = await callOperation("CreateRetweet", viewer, { tweet_id: id });
@@ -263,7 +265,7 @@ export async function restStatusRoute(method: string, path: string, viewer: View
 		if (op === "favorites/create") await callOperation("FavoriteTweet", viewer, { tweet_id: id });
 		if (op === "favorites/destroy") await callOperation("UnfavoriteTweet", viewer, { tweet_id: id });
 		const out = await status(viewer, shown);
-		return out ? Response.json(out) : gone("No status found with that ID.", 144, 404);
+		return out ? Response.json(withText(out)) : gone("No status found with that ID.", 144, 404);
 	} catch (e) {
 		return failure(e);
 	}
@@ -280,6 +282,113 @@ export async function homeTimeline(viewer: Viewer, query: URLSearchParams, lates
 		if (e instanceof PostError) return Response.json({ errors: [{ code: e.code, message: e.message }] }, { status: 400 });
 		throw e;
 	}
+}
+
+const isStatusId = (v: unknown): v is string => typeof v === "string" && /^\d{1,19}$/.test(v);
+const MAX_PAGES = 6;
+
+// the old apps read `text` where later ones send `full_text`, on a repost's original too
+export const withText = (s: Obj | undefined): Obj | undefined =>
+	s && { ...s, text: s.full_text ?? s.text ?? "", ...(s.retweeted_status ? { retweeted_status: withText(s.retweeted_status) } : {}), ...(s.quoted_status ? { quoted_status: withText(s.quoted_status) } : {}) };
+
+// the statuses of one page of a GraphQL timeline, and the cursor for the next
+export function pageOf(timeline: Obj | undefined): { statuses: Obj[]; next?: string } {
+	const statuses: Obj[] = [];
+	let next: string | undefined;
+	for (const instruction of timeline?.instructions ?? [])
+		for (const e of instruction.entries ?? []) {
+			const c = e.content ?? {};
+			if (c.cursorType === "Bottom") next = c.value;
+			const items: Obj[] = c.items ? c.items.map((i: Obj) => i.item?.itemContent ?? {}) : [c.itemContent ?? {}];
+			for (const ic of items) {
+				const s = restStatus(ic.tweet_results?.result);
+				if (s) statuses.push(withText(s)!);
+			}
+		}
+	return { statuses, next };
+}
+
+// newest first, trimmed by since_id and max_id, topped up from older pages
+export async function statusPages(q: URLSearchParams, fetchPage: (cursor?: string) => Promise<Obj | undefined>, exclusiveMax = false): Promise<Obj[]> {
+	const want = Math.min(Math.max(Number(q.get("count")) || 20, 1), 200);
+	const since = isStatusId(q.get("since_id")) ? BigInt(q.get("since_id")!) : 0n;
+	const max = isStatusId(q.get("max_id")) ? BigInt(q.get("max_id")!) : undefined;
+	const out: Obj[] = [];
+	const seen = new Set<string>();
+	let cursor: string | undefined;
+	for (let i = 0; i < MAX_PAGES && out.length < want; i++) {
+		const { statuses, next } = pageOf(await fetchPage(cursor));
+		for (const s of statuses) {
+			const id = BigInt(s.id_str);
+			if (seen.has(s.id_str) || id <= since || (max !== undefined && (exclusiveMax ? id >= max : id > max))) continue;
+			seen.add(s.id_str);
+			out.push(s);
+		}
+		if (!next || next === cursor || !statuses.length) break;
+		cursor = next;
+	}
+	return out.sort((a, b) => (BigInt(b.id_str) > BigInt(a.id_str) ? 1 : -1)).slice(0, want);
+}
+
+// The statuses of the home timeline, newest first, as v1.1 answers them
+function homeStatusList(viewer: Viewer, query: URLSearchParams, exclusiveMax = false): Promise<Obj[]> {
+	return statusPages(query, async (cursor) => ((await callOperation("HomeLatestTimeline", viewer, { count: 40, includeReplies: true, ...(cursor ? { cursor } : {}) })) as Obj).data.home.home_timeline_urt, exclusiveMax);
+}
+
+// the apps read ids as numbers (they do not fit a double, so they are spliced in as text)
+const numericIds = (json: string) => json.replace(/"id_str":"(\d+)"/g, '"id":$1,"id_str":"$1"');
+
+// GET /1.1/statuses/home_timeline.json: a plain array of statuses
+export async function homeStatuses(viewer: Viewer, query: URLSearchParams): Promise<Response> {
+	return new Response(numericIds(JSON.stringify(await homeStatusList(viewer, query))), { headers: { "content-type": "application/json;charset=utf-8" } });
+}
+
+// GET /1.1/timeline/home.json: the "conversations" timeline of the 2013 Android app.
+// The posts and their authors come once in twitter_objects, keyed by id, and the
+// timeline lists entries that point into them (the app reads twitter_objects first).
+export async function homeConversations(viewer: Viewer, query: URLSearchParams): Promise<Response> {
+	// this app asks for the page below the oldest post it has, by that post's own id
+	const list = await homeStatusList(viewer, query, true);
+	const tweets: Obj = {};
+	const users: Obj = {};
+	const addUser = (u: Obj | undefined) => {
+		if (u?.id_str) users[u.id_str] = u;
+	};
+	for (const s of list) {
+		tweets[s.id_str] = s;
+		addUser(s.user);
+		addUser(s.retweeted_status?.user);
+	}
+	// a reply travels with the posts it answers (up to two above it), as a conversation
+	const chains = new Map<string, Obj[]>();
+	await Promise.all(
+		list.map(async (s) => {
+			const chain: Obj[] = [];
+			let at: Obj = s;
+			for (let i = 0; i < 2 && isStatusId(at.in_reply_to_status_id_str); i++) {
+				const parent = at.in_reply_to_status_id_str === at.id_str ? undefined : await status(viewer, at.in_reply_to_status_id_str).catch(() => undefined);
+				if (!parent?.user) break;
+				chain.unshift(withText(parent)!);
+				at = parent;
+			}
+			if (chain.length) chains.set(s.id_str, chain);
+		}),
+	);
+	const inConversations = new Set([...chains.values()].flatMap((c) => c.map((p) => p.id_str)));
+	const timeline = list.flatMap((s) => {
+		const chain = chains.get(s.id_str);
+		if (!chain) return inConversations.has(s.id_str) ? [] : [{ entity_id: { ids: [s.id_str] }, tweet: { id: s.id_str } }];
+		for (const p of chain) {
+			tweets[p.id_str] = p;
+			addUser(p.user);
+		}
+		const all = [...chain, s];
+		const ids = all.map((p) => p.id_str);
+		const participants = [...new Set(all.map((p) => p.user_id_str))];
+		return [{ entity_id: { ids }, conversation: { context: { participants_count: participants.length, target_count: all.length, root_user_id: all[0].user_id_str, target_tweet_id: s.id_str, participant_ids: participants }, ids } }];
+	});
+	const body = `{"twitter_objects":${numericIds(JSON.stringify({ tweets, users }))},"response":${JSON.stringify({ timeline })}}`;
+	return new Response(body, { headers: { "content-type": "application/json;charset=utf-8" } });
 }
 
 const emptyObjects = () => ({ tweets: {}, users: {}, notifications: {}, moments: {}, cards: {}, places: {}, media: {}, broadcasts: {}, topics: {}, lists: {} });

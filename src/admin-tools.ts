@@ -64,6 +64,14 @@ async function badgeExists(id: string | null) {
 	if (id && !(await sql`select 1 from custom_badges where id = ${id}::bigint`).length) throw new AdminError("No such badge.");
 }
 
+// a date staff typed, as an ISO string; blank is null (the real one shows again)
+const shownDate = (v: unknown) => {
+	if (v === null || v === undefined || v === "") return null;
+	const t = Date.parse(String(v));
+	if (Number.isNaN(t) || t < Date.UTC(2006, 0, 1) || t > Date.now() + 365 * 86400e3) throw new AdminError("That isn't a usable date.");
+	return new Date(t).toISOString();
+};
+
 export const toolActions: Record<string, Action> = {
 	// custom badges: an image shown in the badge slot after a name
 	badges: { role: "support", run: async () => ({ badges: await sql`select id::text, name, mime, created_at,
@@ -369,7 +377,7 @@ export const toolActions: Record<string, Action> = {
 			return {};
 		},
 	},
-	// the counts a post shows; a blank one goes back to the real count
+// the counts a post shows; a blank one goes back to the real count
 	setPostCounts: {
 		role: "admin",
 		run: async (a, b) => {
@@ -379,6 +387,31 @@ export const toolActions: Record<string, Action> = {
 			const counts = countsOf(b.counts, ["likes", "replies", "reposts", "quotes", "bookmarks", "views"]);
 			await sql`update posts set count_overrides = ${counts ? sql`${JSON.stringify(counts)}::text::jsonb` : null} where id = ${id}::bigint`;
 			await audit(a, "set_post_counts", p.user_id, { post: id, counts });
+			return {};
+		},
+	},
+	// the date a post shows; blank goes back to the real one. Order and ids stay as they were.
+	setPostDate: {
+		role: "admin",
+		run: async (a, b) => {
+			const id = idOf(b.id);
+			const [p] = await sql`select user_id::text from posts where id = ${id}::bigint`;
+			if (!p) throw new AdminError("No such post.", 404);
+			const at = shownDate(b.date);
+			await sql`update posts set shown_at = ${at}::timestamptz where id = ${id}::bigint`;
+			await audit(a, "set_post_date", p.user_id, { post: id, date: at });
+			return {};
+		},
+	},
+	// the "Joined" date an account shows; blank goes back to the real one
+	setJoinDate: {
+		role: "admin",
+		run: async (a, b) => {
+			const id = idOf(b.id);
+			await guard(a, id, true);
+			const at = shownDate(b.date);
+			await sql`update users set shown_created_at = ${at}::timestamptz where id = ${id}::bigint`;
+			await audit(a, "set_join_date", id, { date: at });
 			return {};
 		},
 	},

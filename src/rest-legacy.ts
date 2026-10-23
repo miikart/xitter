@@ -9,7 +9,7 @@
 import type { Viewer } from "./auth";
 import { blockedIds } from "./blocks";
 import { callOperation } from "./graphql";
-import { legacyUser } from "./model";
+import { apiDate, legacyUser } from "./model";
 import { PostError, setPinned } from "./posts";
 import { followList, setFollow, userById, userByName, usersByIds } from "./users";
 import { unreadCount } from "./notifications";
@@ -93,8 +93,17 @@ const userList = async (viewer: Viewer, ids: string[]) => {
 const dmState = (cursor = "0") => ({ last_seen_event_id: "0", trusted_last_seen_event_id: "0", untrusted_last_seen_event_id: "0", cursor, entries: [], users: {}, conversations: {} });
 const noDirectMessages = () => gone("Direct messages are not available here.", 214, 403);
 
+// The 2016 apps read a numeric id and a Twitter-format created_at, and drop the
+// session they just signed in when the account they get back lacks them. The id is
+// spliced in as text: it does not fit a double.
+const classicAccount = async (v: Viewer) => {
+	const u = (await userById(v.id, v.id))!;
+	const body = JSON.stringify({ ...legacyUser(u), created_at: apiDate(u.created_at), profile_image_url: legacyUser(u).profile_image_url_https });
+	return new Response(body, { headers: { "content-type": "application/json;charset=utf-8" } });
+};
+
 const GET: Record<string, Handler> = {
-	"/1.1/account/verify_credentials.json": async (v) => legacyUser((await userById(v.id, v.id))!),
+	"/1.1/account/verify_credentials.json": classicAccount,
 	"/1.1/users/show.json": async (v, q) => legacyUser(await target(v, q)),
 	"/1.1/followers/list.json": async (v, q) => userList(v, (await followList(v.id, (await target(v, q)).id, "followers")).map((u) => u.id)),
 	"/1.1/friends/list.json": async (v, q) => userList(v, (await followList(v.id, (await target(v, q)).id, "following")).map((u) => u.id)),

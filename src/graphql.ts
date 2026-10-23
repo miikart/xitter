@@ -179,7 +179,7 @@ const home =
 	const items = await feed({
 		viewerId: viewer.id,
 		authors: following ? { following: true } : { all: true },
-		replies: false,
+		replies: vars.includeReplies === true,
 		kinds: "both",
 		limit: count,
 		...(newer ? { after: at } : { before: at }),
