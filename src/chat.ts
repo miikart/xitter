@@ -13,8 +13,8 @@
 // realm (a separate service, see README) reached at /juicebox, with tokens this
 // instance signs. Voice and video calls are not offered.
 
-import { pictureShape } from "./model";
-import { createHmac, randomBytes } from "node:crypto";
+import { affiliateChecked, pictureShape, remoteCheckHidden, shownVerifiedType } from "./model";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { ServerWebSocket } from "bun";
 import type { User, Viewer } from "./auth";
@@ -38,10 +38,11 @@ const SECRETS_FILE = "data/chat-secrets.json";
 function loadSecrets(): Secrets {
 	let saved: Partial<Secrets> = {};
 	if (existsSync(SECRETS_FILE)) saved = JSON.parse(readFileSync(SECRETS_FILE, "utf8"));
+	// `||`: a variable left empty in .env would otherwise sign tokens with an empty key
 	const s: Secrets = {
-		tokenKey: process.env.CHAT_TOKEN_SECRET ?? saved.tokenKey ?? randomBytes(32).toString("hex"),
-		realmId: process.env.JUICEBOX_REALM_ID ?? saved.realmId ?? randomBytes(16).toString("hex"),
-		tenantSecret: process.env.JUICEBOX_TENANT_SECRET ?? saved.tenantSecret ?? randomBytes(32).toString("hex"),
+		tokenKey: process.env.CHAT_TOKEN_SECRET || saved.tokenKey || randomBytes(32).toString("hex"),
+		realmId: process.env.JUICEBOX_REALM_ID || saved.realmId || randomBytes(16).toString("hex"),
+		tenantSecret: process.env.JUICEBOX_TENANT_SECRET || saved.tenantSecret || randomBytes(32).toString("hex"),
 	};
 	if (!existsSync(SECRETS_FILE) || JSON.stringify(saved) !== JSON.stringify(s)) {
 		mkdirSync("data", { recursive: true });
@@ -65,8 +66,17 @@ function jwt(header: object, claims: object, key: string): string {
 	return `${body}.${createHmac("sha256", key).update(body).digest("base64url")}`;
 }
 // the chat socket's token, from GenerateXChatTokenMutation
-const socketToken = (userId: string) => jwt({ alg: "HS256", typ: "JWT" }, { sub: userId, exp: Math.floor(Date.now() / 1000) + 86400 }, secrets.tokenKey);
-export const socketUser = (token: string): string | undefined => verifyChatToken(token, secrets.tokenKey)?.sub as string | undefined;
+// `sid` ties it to the session that asked: signed out (or reset), the token
+// stops opening sockets instead of working for the rest of its day
+const sessionId = (sessionToken: string) => createHash("sha256").update(sessionToken).digest("hex");
+const socketToken = (userId: string, sessionToken: string) =>
+	jwt({ alg: "HS256", typ: "JWT" }, { sub: userId, exp: Math.floor(Date.now() / 1000) + 86400, ...(sessionToken ? { sid: sessionId(sessionToken) } : {}) }, secrets.tokenKey);
+// `sid` is missing from tokens made before it existed; they run out within a day
+export function socketUser(token: string): { userId: string; sid?: string } | undefined {
+	const claims = verifyChatToken(token, secrets.tokenKey);
+	if (!claims) return undefined;
+	return { userId: claims.sub as string, sid: typeof claims.sid === "string" && /^[0-9a-f]{64}$/.test(claims.sid) ? claims.sid : undefined };
+}
 
 // what the realm accepts: kid tenant:version, iss tenant, aud realm, sub user
 const realmToken = (userId: string) =>
@@ -106,8 +116,8 @@ async function hasKey(userIds: string[]): Promise<Set<string>> {
 function verificationOf(u: User) {
 	return {
 		__typename: "UserVerification",
-		is_blue_verified: u.verified_type === "blue" || (!u.verified_type && !!u.org),
-		is_verified_organization: u.verified_type === "business",
+		is_blue_verified: !remoteCheckHidden(u) && (u.verified_type === "blue" || (!u.verified_type && affiliateChecked(u))),
+		is_verified_organization: shownVerifiedType(u) === "business",
 		is_verified_organization_affiliate: !!u.org,
 		verified: false,
 	};
@@ -205,13 +215,28 @@ async function signingKey(userId: string, version: string | undefined): Promise<
 
 // --- conversations
 
-export class ChatError extends Error {}
+export class ChatError extends Error {
+	constructor(message: string, public code?: number) {
+		super(message);
+	}
+}
 
 // A direct conversation's id names its two members, smaller id first:
 // "<a>-<b>" (older clients wrote "<a>:<b>").
 function directMembers(id: string): [string, string] | undefined {
 	const m = /^(\d{1,19})[-:](\d{1,19})$/.exec(id);
 	return m ? [m[1], m[2]] : undefined;
+}
+
+async function restrictedCanMessage(viewerId: string, conversationId: string) {
+	const [viewer] = await sql`select status from users where id = ${viewerId}::bigint`;
+	if (viewer?.status !== "restricted") return true;
+	const pair = directMembers(conversationId);
+	if (!pair) return false;
+	const peer = pair.find((id) => id !== viewerId);
+	if (!peer) return false;
+	const [follows] = await sql`select 1 from follows where follower_id = ${peer}::bigint and followee_id = ${viewerId}::bigint`;
+	return !!follows;
 }
 
 async function members(conversationId: string): Promise<string[]> {
@@ -663,7 +688,7 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 		const [me] = await userResults(v.id, [v.id]);
 		return { data: { viewer: { claims: [], is_active_creator: false, user_results: { id: Buffer.from(`User:${v.id}`).toString("base64"), ...me } } } };
 	},
-	GenerateXChatTokenMutation: (v) => ({ data: { user_get_x_chat_auth_token: { __typename: "XChatGetAuthTokenResponse", token: socketToken(v.id) } } }),
+	GenerateXChatTokenMutation: (v) => ({ data: { user_get_x_chat_auth_token: { __typename: "XChatGetAuthTokenResponse", token: socketToken(v.id, v.token) } } }),
 
 	GetPublicKeysQuery: async (v, vars) => ({
 		data: {
@@ -891,6 +916,7 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 	},
 	SendMessageCreateMutation: async (v, vars) => {
 		const conversationId = String(vars.conversation_id ?? "");
+		if (!(await restrictedCanMessage(v.id, conversationId))) throw new ChatError("Your account can't message this recipient.", 326);
 		const all = await joinable(v.id, conversationId);
 		const mce = decodeBlob(vars.encoded_message_create_event);
 		mce[104] = i64(Date.now());
@@ -914,6 +940,7 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 	SendMessageEventMutation: async (v, vars) => {
 		const ev = decodeBlob(vars.encoded_message_event);
 		const conversationId = thrift.text(ev[4]) ?? "";
+		if (!(await restrictedCanMessage(v.id, conversationId))) throw new ChatError("Your account can't send this message.", 326);
 		const all = await joinable(v.id, conversationId);
 		if (![1, 6, 9, 12, 13, 17, 18, 19].includes(kindOf(ev))) throw new ChatError("Use the conversation action for this event.");
 		const { seq } = await stamp(ev, v.id, conversationId);
@@ -923,7 +950,7 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 	},
 };
 
-export const knownChatOperation = (name: string) => name in chatHandlers;
+export const knownChatOperation = (name: string) => Object.hasOwn(chatHandlers, name);
 
 // the browser's way to the Juicebox realm
 export async function juiceboxProxy(req: Request, path: string): Promise<Response> {

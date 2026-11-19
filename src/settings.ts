@@ -3,6 +3,7 @@
 // replaced whenever the panel saves one.
 
 import { sql } from "./db";
+import { gifAvailable } from "./gifs";
 import { foldGlyphs } from "./fold";
 
 export type SignupMode = "invite" | "open" | "closed";
@@ -26,6 +27,9 @@ export const FEATURES = {
 	notes_everyone: "Anyone can write Community Notes (off: only accounts given access on their admin page)",
 	link_previews: "Previews of public posts and profiles when their links are shared in other apps",
 	archive_import: "Import from X: accounts upload their X archive and its posts come over (Settings > Your account)",
+	money: "Equicoins: accounts send each other money from the side bar (the instance's own play money, not real currency)",
+	circles: "Circles: posts only the people an account picks can see (Circle instead of Everyone in the composer)",
+	affiliate_checkmarks: "Checkmarks for affiliates of an organisation (off: they keep the organisation's badge, and only a checkmark of their own shows)",
 } as const;
 export type Feature = keyof typeof FEATURES;
 
@@ -53,8 +57,14 @@ const DEFAULTS = {
 		notes_everyone: true,
 		link_previews: true,
 		archive_import: false,
+		money: false,
+		circles: true,
+		affiliate_checkmarks: true,
 	} as Record<Feature, boolean>,
 	limits: { image_mb: 5, video_mb: Number(process.env.MAX_VIDEO_MB ?? 200), video_seconds: Number(process.env.MAX_VIDEO_SECONDS ?? 600) },
+	// media-compress.ts and video.ts: uploads made smaller as they're stored, for
+	// instances short on disk; off keeps photos as they came
+	media: { compress: false, photo_max_side: 2048, photo_quality: 80, video_max_side: 1280, video_crf: 26 },
 	// per account per 15 minutes (ratelimit.ts); sign-in and mail limits are fixed
 	rate_limits: { read: 6000, endpoint: 1000, write: 1500, post: 150, engage: 1000, dm: 1500, upload: 150 },
 	// longest post per badge, in X's weighted characters (textlen.ts); grey covers
@@ -87,12 +97,30 @@ const DEFAULTS = {
 	// the admin panel itself (admin.ts staffGate): staff must have two-factor on;
 	// only these addresses (IPs or CIDR ranges) reach it, none meaning any
 	security: { staff_2fa: false, admin_ips: [] as string[] },
-	// backups.ts: a database dump every day, the newest `keep` kept
-	backups: { daily: false, keep: 7 },
+	// Admin > Federation: show the checkmarks other instances gave their accounts
+	// (model.ts shownVerifiedType); off, they look unverified here
+	remote_checkmarks: true,
+	// backups.ts: while `daily` is on, a database dump every `every_hours` (one
+	// of BACKUP_INTERVALS), the newest `keep` kept
+	backups: { daily: false, keep: 7, every_hours: 24 },
+	// self-update.ts: the repository and branch an admin last updated from, which
+	// the update check (update-check.ts) then follows; blank for its defaults
+	update_source: { repo: "", branch: "" },
 	// member-invites.ts: invites members make themselves, while sign-up is by invite
 	invite_quota: { enabled: false, per_month: 3, uses: 1, min_age_days: 7 },
 	// archive-import.ts: who may import from X, while the feature is on; staff skip both
 	archive_import: { min_age_days: 7, approval: true },
+	// money.ts: what a new wallet holds and the most one transfer moves, in cents
+	// like_cents: what a post's author earns for each like (once per post and account)
+	// feed: the handle of a local account that posts every payment ("" for none)
+	// follow_network: take the starting balance, like reward and largest payment from xitter.space
+	// peer_daily_cents: most taken in from one peer a day, its transfers and likes (0: no limit).
+	// A peer's word is all there is for what it sends, so the default is one largest payment a day.
+	// move_balance: an account moving away takes its balance along
+	// network_totals: share this instance's totals with peers and show the network's
+	money: { starting_cents: 500, max_transfer_cents: 100_000, like_cents: 50, feed: "", follow_network: false, peer_daily_cents: 100_000, move_balance: true, network_totals: false },
+	// money shop: listings are in money_shop_items; only approved announcements are shown
+	money_shop: { enabled: false, announcement: null as null | { id: string; text: string; buttons: { label: string; url: string }[] } },
 	// the client's own feature switches, set by an admin (Admin > Feature
 	// switches); they win over the build's values and Xitter's own (shell.ts)
 	switch_overrides: {} as Record<string, unknown>,
@@ -119,8 +147,7 @@ export async function loadSettings() {
 }
 
 export const settings = (): Settings => current;
-// GIF search needs a Klipy key; without one the button stays hidden
-export const feature = (f: Feature) => (f === "gifs" && !process.env.KLIPY_API_KEY && !process.env.TENOR_API_KEY ? false : current.features[f] !== false);
+export const feature = (f: Feature) => (f === "gifs" && !gifAvailable() ? false : current.features[f] !== false);
 // the admin's blocked phrases, in any case and through look-alike letters and
 // invisible characters (names.ts); spacing still counts, unlike names
 const phraseForm = (text: string) => foldGlyphs(text).replace(/\p{Cf}/gu, "");

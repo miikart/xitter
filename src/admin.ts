@@ -22,6 +22,7 @@ import { createInvite, staffHandleProblem } from "./invites";
 import { forgetHeld, handleHeld, retireAccount } from "./held";
 import { activeStrikes, shutOut } from "./moderation";
 import { REASONS } from "./reports";
+import { startSweep, sweepState } from "./media-compress";
 import { FEATURES, type Feature, type SignupMode, allSettings, setSetting, settings } from "./settings";
 import { SLOTS, brandingState, resetBranding, saveBranding } from "./branding";
 import { createPlatform, renameWebSource } from "./platforms";
@@ -34,9 +35,10 @@ import { stickerActions } from "./stickers";
 import { oauthAppActions } from "./oauth-admin";
 import { hashflagActions } from "./hashflags";
 import { switchActions } from "./feature-switches";
+import { moneyActions } from "./money-admin";
 import { AFFILIATION_LIMIT } from "./org-manage";
 import { staffGate } from "./staff-access";
-import { countryCode, countryName } from "./countries";
+import { countryCode, countryDisplayName } from "./countries";
 import { GRANTABLE, PERMISSIONS, RANK, type Role, allows, mayRun, permissionOf, rolePermissions } from "./staff-permissions";
 
 export class AdminError extends Error {
@@ -50,6 +52,26 @@ export class AdminError extends Error {
 
 type Body = Record<string, any>;
 export type Action = { role: Role; run: (actor: Viewer, b: Body, req?: Request) => Promise<unknown> };
+
+// Every action the code logs (grep audit( and audit_log inserts when adding one),
+// so the audit filter offers them all, logged yet or not.
+export const AUDIT_ACTIONS = [
+	"add_affiliate", "add_staff_note", "add_sticker", "archive_import", "article_visibility", "auto_suspend_name", "automod_second_chance",
+	"automod_strike", "backup_schedule", "block_oauth_app", "bulk_status", "bulk_strike", "compress_stored", "create_backup", "create_badge",
+	"create_hashflag", "create_invites", "create_label", "create_org", "create_platform", "create_sticker_pack", "delete_account", "delete_backup",
+	"delete_badge", "delete_community_note", "delete_explore_card", "delete_hashflag", "delete_label", "delete_media", "delete_post", "delete_sticker",
+	"delete_sticker_pack", "delete_topic", "download_backup", "edit_profile", "end_hashflag", "escalate", "evasion_signup_refused", "expire_sanction",
+	"federation_accept_key", "federation_block", "federation_drop_media", "federation_pull", "federation_purge", "federation_unblock", "hosting_adopt",
+	"hosting_approve", "hosting_reject", "hosting_revoke", "invite_quota", "money_adjust", "money_remote_shop_update", "money_reverse",
+	"money_settings", "money_shop_announcement_clear", "money_shop_item_create", "money_shop_item_update", "money_shop_settings", "org_badge",
+	"release_identity", "remove_affiliate", "rename_sticker_pack", "reset_branding", "reset_decor", "reset_password", "resolve_appeal",
+	"resolve_errors", "review_community_note_appeal", "revoke_api_tokens", "revoke_invite", "revoke_platform", "revoke_session", "revoke_strike",
+	"rollback_client", "save_automod", "save_operations", "save_security", "save_settings", "self_update", "self_update_rollback", "send_staff_message",
+	"send_test_mail", "set_badge", "set_badges", "set_feature_switch", "set_flag", "set_never_sensitive", "set_notes_access", "set_post_counts",
+	"set_post_notice", "set_post_visibility", "set_profile_label", "set_remote_checkmarks", "set_role", "set_signup_mode", "set_staff_permissions",
+	"set_status", "set_translator", "set_user_counts", "sign_out", "superadmin_emergency_block", "superadmin_emergency_lift", "suspend_blocked_names",
+	"temporary_status", "unblock_oauth_app", "update_client", "upload_branding",
+];
 
 export async function audit(actor: Viewer, action: string, target: string | null, detail: unknown = null) {
 	await sql`insert into audit_log (id, actor_id, action, target, detail)
@@ -135,6 +157,7 @@ const ACTIONS: Record<string, Action> = {
 			media: { stored: storesRemoteMedia(), ...(await savedRemoteMedia()) },
 			registry: { sequence: registrySequence(), checked_at: registryCheckedAt ? new Date(registryCheckedAt).toISOString() : null, error: registryError },
 			outbox_head: head,
+			remote_checkmarks: settings().remote_checkmarks,
 			superadmins: SUPERADMINS.map((x) => `${x.screen_name}@${x.instance}`),
 			superadmin: !!a.superadmin,
 			instances: await Promise.all(
@@ -198,6 +221,12 @@ const ACTIONS: Record<string, Action> = {
 		const dropped = await dropRemoteMedia();
 		await audit(a, "federation_drop_media", INSTANCE_ID, dropped);
 		return dropped;
+	} },
+	setRemoteCheckmarks: { role: "admin", run: async (a, b) => {
+		if (typeof b.enabled !== "boolean") throw new AdminError("Provide a boolean setting.");
+		await setSetting("remote_checkmarks", b.enabled);
+		await audit(a, "set_remote_checkmarks", INSTANCE_ID, { enabled: b.enabled });
+		return {};
 	} },
 	federationPull: { role: "admin", run: async (a, b) => {
 		const id = instanceOf(b.instance);
@@ -362,11 +391,11 @@ const ACTIONS: Record<string, Action> = {
 		run: async (_a, b) => {
 			const q = String(b.q ?? "").trim().replace(/^@/, "");
 			const status = ["active", "restricted", "limited", "suspended"].includes(b.status) ? b.status : null;
-			const staff = !!b.staff;
+			const role = ["staff", "nonstaff", "admin", "moderator", "support"].includes(String(b.role)) ? String(b.role) : null;
 			const home = homeFilter(b.home);
 			const match = sql`(${q} = '' or u.screen_name ilike ${like(q)} or u.name ilike ${like(q)})
 					and (${status}::text is null or u.status = ${status})
-					and (not ${staff} or u.role is not null) ${home}`;
+					and (${role}::text is null or case ${role}::text when 'staff' then u.role is not null when 'nonstaff' then u.role is null else u.role = ${role}::text end) ${home}`;
 			const rows = await sql`select ${userListCols} from users u where ${match}
 				order by u.created_at desc, u.id desc limit ${Math.min(Math.max(Number(b.limit) || 50, 1), 500)} offset ${Math.max(Number(b.offset) || 0, 0)}`;
 			const [{ total }] = await sql`select count(*)::int as total from users u where ${match}`;
@@ -378,7 +407,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.signup_country, u.count_overrides, u.shown_created_at, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.banner_url, u.based_in_override, u.country, u.signup_country, u.count_overrides, u.shown_created_at, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select count(*)::int from api_tokens t where t.user_id = u.id) as api_tokens,
@@ -396,7 +425,7 @@ const ACTIONS: Record<string, Action> = {
 				join login_events other on other.ip = mine.ip and other.user_id <> mine.user_id and other.created_at > now() - interval '90 days'
 				join users u on u.id = other.user_id
 				where mine.user_id = ${id}::bigint and mine.ip is not null and mine.created_at > now() - interval '90 days' limit 20`;
-			u.joined_from = u.signup_country ? (countryName(u.signup_country) ?? u.signup_country) : "";
+			u.joined_from = u.signup_country ? countryDisplayName(u.signup_country) : "";
 			return { user: u, invited, log, alts, strikes, next_step: ladder.length ? ladder[Math.min(strikes + 1, ladder.length) - 1] : 0 };
 		},
 	},
@@ -425,9 +454,8 @@ const ACTIONS: Record<string, Action> = {
 			// the country after the date joined in About this account; blank hides it
 			if (typeof b.joined_from === "string") {
 				const value = b.joined_from.trim();
-				const code = value ? countryCode(value) : null;
-				if (code === undefined) throw new AdminError("Joined from takes a country name or its two-letter code, like SE.");
-				changes.signup_country = code;
+				if ([...value].length > 60) throw new AdminError("Joined from is at most 60 characters.");
+				changes.signup_country = value ? countryCode(value) ?? value : null;
 			}
 			if (!Object.keys(changes).length) return {};
 			if (changes.screen_name) {
@@ -465,7 +493,7 @@ const ACTIONS: Record<string, Action> = {
 			await guard(a, id, true);
 			// verified_at: "Verified since" on the About page; a new badge type starts it again
 			await sql`update users set verified_at = case when ${badge}::text is null then null when verified_type is distinct from ${badge}::text then now() else verified_at end,
-				verified_type = ${badge} where id = ${id}::bigint`;
+				verified_type = ${badge}, shop_verified_until = null where id = ${id}::bigint`;
 			await audit(a, "set_badge", id, { badge });
 			return {};
 		},
@@ -654,6 +682,7 @@ const ACTIONS: Record<string, Action> = {
 			const author = String(b.author ?? "").trim().replace(/^@/, "");
 			const match = sql`(${q} = '' or p.text ilike ${like(q)}) and (${author} = '' or lower(u.screen_name) = lower(${author}))`;
 			const rows = await sql`select p.id::text as id, p.text, p.created_at, p.hidden, p.sensitive, p.notice, p.count_overrides, p.shown_at, p.reply_to_id::text as reply_to_id, u.id::text as user_id, u.screen_name, u.name,
+				(select c.screen_name from users c where c.id = p.circle_owner_id) as circle_owner,
 				(select count(*)::int from likes l where l.post_id = p.id) as likes,
 				(select count(*)::int from media m where m.post_id = p.id) as media
 				from posts p join users u on u.id = p.user_id
@@ -751,8 +780,19 @@ const ACTIONS: Record<string, Action> = {
 
 	settings: {
 		role: "support",
-		run: async () => ({ settings: await allSettings(), features: FEATURES, branding: brandingState(), slots: SLOTS }),
+		run: async () => ({ settings: await allSettings(), features: FEATURES, branding: brandingState(), slots: SLOTS, compression: sweepState() }),
 	},
+
+	// Settings > Media: files stored before compression was on (media-compress.ts)
+	compressStored: {
+		role: "admin",
+		run: async (a) => {
+			if (!settings().media.compress) throw new AdminError("Switch compression on and save first.");
+			if (startSweep()) await audit(a, "compress_stored", null);
+			return { compression: sweepState() };
+		},
+	},
+	compressionState: { role: "support", run: async () => ({ compression: sweepState() }) },
 
 	saveSettings: {
 		role: "admin",
@@ -790,6 +830,21 @@ const ACTIONS: Record<string, Action> = {
 					video_seconds: n(b.limits.video_seconds, 5, 7200, "Video length"),
 				});
 				changed.push("limits");
+			}
+			if (b.media && typeof b.media === "object") {
+				const n = (v: unknown, lo: number, hi: number, what: string) => {
+					const x = Number(v);
+					if (!Number.isInteger(x) || x < lo || x > hi) throw new AdminError(`${what} must be a whole number from ${lo} to ${hi}.`);
+					return x;
+				};
+				await setSetting("media", {
+					compress: !!b.media.compress,
+					photo_max_side: [680, 900, 1200, 2048, 4096].includes(Number(b.media.photo_max_side)) ? Number(b.media.photo_max_side) : n(b.media.photo_max_side, 680, 4096, "Photo size"),
+					photo_quality: n(b.media.photo_quality, 30, 100, "Photo quality"),
+					video_max_side: n(b.media.video_max_side, 240, 1920, "Video size"),
+					video_crf: n(b.media.video_crf, 18, 40, "Video quality"),
+				});
+				changed.push("media");
 			}
 			if (b.rate_limits && typeof b.rate_limits === "object") {
 				const next = { ...s.rate_limits };
@@ -886,7 +941,15 @@ const ACTIONS: Record<string, Action> = {
 			const action = typeof b.action === "string" && /^[a-z_]{1,40}$/.test(b.action) ? b.action : null;
 			const who = typeof b.target === "string" ? b.target.trim().replace(/^@/, "").slice(0, 300).replace(new RegExp(`@${INSTANCE_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"), "") : "";
 			const offset = Math.max(0, Math.min(Number(b.offset) || 0, 100_000));
+				const total = await sql`select count(*)::int as total from audit_log l
+					left join users t on l.target ~ '^[0-9]+$' and t.id = l.target::bigint
+					where ${action ? sql`l.action = ${action}` : sql`true`} and ${b.automatic ? sql`l.actor_id is null` : sql`true`}
+						and ${who ? sql`lower(t.screen_name) = lower(${who})` : sql`true`}`;
+			// the filter offers every action the code logs, and anything older the log still holds
+			const logged = await sql`select distinct action from audit_log order by action`;
 			return {
+				total: Number(total[0]?.total ?? 0),
+				actions: [...new Set([...AUDIT_ACTIONS, ...logged.map((r: { action: string }) => r.action)])].sort(),
 				entries: await sql`select l.id::text as id, l.action, l.target, l.detail, l.created_at, a.screen_name as actor, l.actor_id is null as automatic,
 					t.screen_name as target_name
 					from audit_log l left join users a on a.id = l.actor_id
@@ -904,6 +967,7 @@ Object.assign(ACTIONS, stickerActions);
 Object.assign(ACTIONS, oauthAppActions);
 Object.assign(ACTIONS, hashflagActions);
 Object.assign(ACTIONS, switchActions);
+Object.assign(ACTIONS, moneyActions);
 
 // every permission names real actions, and its default is the role written on them
 for (const [key, p] of Object.entries(PERMISSIONS))
@@ -911,7 +975,7 @@ for (const [key, p] of Object.entries(PERMISSIONS))
 		if (ACTIONS[name]?.role !== p.role) throw new Error(`Staff permission ${key}: ${name} ${ACTIONS[name] ? `needs ${ACTIONS[name].role}, not ${p.role}` : "is no action"}.`);
 
 const READS = new Set(
-	"federation platforms mail cards topics me staffPermissions stats users user orgs affiliates posts reports invites settings audit badges labels staffNotes staffMessages appeals handleHistory userSessions blockedNameAccounts articles media operations heldIdentities health security backups archiveImports client checkClient errors inviteTree featureSwitches hashflags oauthApps stickers automodScan".split(
+	"federation platforms mail cards topics me staffPermissions stats users user orgs affiliates posts reports invites settings audit badges labels staffNotes staffMessages appeals handleHistory userSessions blockedNameAccounts articles media mediaAccount operations heldIdentities updateStatus health security backups archiveImports client checkClient errors inviteTree featureSwitches hashflags oauthApps stickers automodScan money".split(
 		" ",
 	),
 );
@@ -932,7 +996,7 @@ export async function adminApi(req: Request, action: string, viewer: Viewer | un
 		await audit(viewer, "upload_branding", null, { slot });
 		return Response.json({});
 	}
-	const a = ACTIONS[action];
+	const a = Object.hasOwn(ACTIONS, action) ? ACTIONS[action] : undefined;
 	if (!a) return fail("Unknown action.", 404);
 	if (!mayRun(viewer.role, action, a.role)) return fail(permissionOf(action) ? "An admin hasn't given your role permission to do that." : `Needs the ${a.role} role.`, 403);
 	const body = await req.json().catch(() => ({}));

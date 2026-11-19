@@ -1,6 +1,6 @@
 {
 	"version": 1,
-	"sequence": 18,
+	"sequence": 25,
 	"instances": [
 		{
 			"id": "a.aagaming.me",
@@ -24,20 +24,6 @@
 			"state": "active"
 		},
 		{
-			"id": "jr1.xitter.space",
-			"name": "jr1",
-			"source_url": "https://github.com/Xittered/xitter",
-			"public_key": "MtOOU2p-wazLBbp3goandZk5MLD_BPKT9IikJcIFm5c",
-			"state": "active"
-		},
-		{
-			"id": "nidus.fourteentrees.net",
-			"name": "Nidus",
-			"source_url": "https://github.com/Xittered/xitter",
-			"public_key": "kgTDVqZmPWxdWqkSo_cuWcYYmkFnk-YqWMz2RYwKY4w",
-			"state": "active"
-		},
-		{
 			"id": "social.opsex.best",
 			"name": "Xitter",
 			"source_url": "https://github.com/gabytz777/xitter",
@@ -45,10 +31,17 @@
 			"state": "active"
 		},
 		{
-			"id": "social.pixelatedaria.space",
-			"name": "social.pixelatedaria.space",
-			"source_url": "https://github.com/xittered/xitter",
-			"public_key": "yTE4xnSExcGTOgq_JAhElkvce0vif-MxTZefmy-8IeY",
+			"id": "testing.xitter.space",
+			"name": "Xitter Testing",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "MtOOU2p-wazLBbp3goandZk5MLD_BPKT9IikJcIFm5c",
+			"state": "active"
+		},
+		{
+			"id": "twitter.meowing.zip",
+			"name": "NOT Twitter",
+			"source_url": "https://github.com/10kbcat/xitter",
+			"public_key": "umKV5puos6jxSWboWpvR3vgXcvVB-1EAx7U-nSFAW8E",
 			"state": "active"
 		},
 		{
@@ -80,6 +73,13 @@
 			"state": "active"
 		},
 		{
+			"id": "xit.pixelatedaria.space",
+			"name": "xit",
+			"source_url": "https://github.com/xittered/xitter",
+			"public_key": "Y0cHJS-cafemUL2VtqitM9IaETXLYAzy54c1drovxPk",
+			"state": "active"
+		},
+		{
 			"id": "xitt.flex.pm",
 			"name": "Xittor",
 			"source_url": "https://github.com/FlexKleks/xitter",
@@ -87,10 +87,17 @@
 			"state": "active"
 		},
 		{
-			"id": "xitter.opuadm.com",
+			"id": "xitter.charl1e39.win",
 			"name": "Xitter",
 			"source_url": "https://github.com/Xittered/xitter",
-			"public_key": "FDWBt_uXkSyKKyM2J_9bYLfryG5N0bHFseMprag-Qv8",
+			"public_key": "bDH0kpDYJBQSgiQtPnUfOgOgDyBKR9PtCCare8XB0n8",
+			"state": "active"
+		},
+		{
+			"id": "xitter.girlskissing.gay",
+			"name": "xitter: lesbian edition",
+			"source_url": "https://git.iambrdn.dev/braiden/xitter-custom",
+			"public_key": "kgTDVqZmPWxdWqkSo_cuWcYYmkFnk-YqWMz2RYwKY4w",
 			"state": "active"
 		},
 		{
@@ -105,6 +112,13 @@
 			"name": "Xit",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "C_9Cz5GkJjtSvWngLyVhfSTscLdcYo6Omx_EpSzQU5w",
+			"state": "active"
+		},
+		{
+			"id": "xittertest.natolix.me",
+			"name": "Xit",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "buxzRN1JZpHM3-9r6KjIT7IgqvxD7kT1_7GdvDp_lrM",
 			"state": "active"
 		}
 	]

@@ -11,8 +11,10 @@ import { sql } from "./db";
 import { plainTweetResult, tweetResult, userResult } from "./model";
 import type { PostRow } from "./model";
 import { postsByIds } from "./posts";
-import { settings } from "./settings";
+import { circleMember } from "./circles";
+import { feature, settings } from "./settings";
 import { usersByIds } from "./users";
+import { formatCents } from "./money";
 
 // how many names a grouped notification lists before "and N others"
 const SHOWN_USERS = 3;
@@ -22,7 +24,9 @@ type Mention = { kind: "post"; postId: string; at: number; reason: "reply" | "qu
 // a message, warning or strike from staff, or the decision on an appeal
 // a notice from the instance; `url` is where it leads, /account/notices if none
 type Staff = { kind: "staff"; key: string; at: number; text: string; url?: string };
-type Item = Group | Mention | Staff;
+// money sent to the viewer, asked of them, or their request declined (money.ts); `users` holds who did it
+type Money = { kind: "money"; key: string; at: number; users: string[]; path: string; text: string; postId?: undefined };
+type Item = Group | Mention | Staff | Money;
 
 const ms = (d: Date) => d.getTime();
 
@@ -83,6 +87,31 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 			where user_id = ${viewerId}::bigint and resolved_at >= ${lo} and resolved_at < ${hi} order by resolved_at desc limit ${opts.limit}`;
 		for (const r of appeals)
 			out.push({ kind: "staff", key: `appeal-${r.id}`, at: ms(r.at), text: `${team[0].toUpperCase()}${team.slice(1)} ${r.status === "accepted" ? "accepted" : "turned down"} your appeal.` });
+		// Equicoins, while it is switched on (money.ts)
+		if (feature("money")) {
+			const paid = await sql`select t.id, t.sender_id, t.amount_cents, t.note, t.created_at as at from money_transfers t
+				where t.recipient_id = ${viewerId}::bigint and t.sender_id not in ${hidden} and t.created_at >= ${lo} and t.created_at < ${hi}
+				order by t.created_at desc limit ${opts.limit}`;
+			for (const r of paid)
+				out.push({ kind: "money", key: `money-${r.id}`, at: ms(r.at), users: [String(r.sender_id)], path: `/i/xmoney/p/${r.id}`, text: `sent you ${formatCents(Number(r.amount_cents))}${r.note ? `: “${clip(r.note)}”` : ""}` });
+			// requests of the viewer, and the viewer's own that were declined
+			const requested = await sql`select q.id, q.requester_id, q.amount_cents, q.note, q.created_at as at from money_requests q
+				where q.payer_id = ${viewerId}::bigint and q.requester_id not in ${hidden} and q.created_at >= ${lo} and q.created_at < ${hi}
+				order by q.created_at desc limit ${opts.limit}`;
+			for (const r of requested)
+				out.push({ kind: "money", key: `request-${r.id}`, at: ms(r.at), users: [String(r.requester_id)], path: `/i/xmoney/r/${r.id}`, text: `requested ${formatCents(Number(r.amount_cents))} from you${r.note ? `: “${clip(r.note)}”` : ""}` });
+			const declined = await sql`select q.id, q.payer_id, q.amount_cents, q.resolved_at as at from money_requests q
+				where q.requester_id = ${viewerId}::bigint and q.status = 'declined' and q.payer_id not in ${hidden} and q.resolved_at >= ${lo} and q.resolved_at < ${hi}
+				order by q.resolved_at desc limit ${opts.limit}`;
+			// something bought in the shop for the viewer, once staff delivered it
+			const gifts = await sql`select o.id, o.user_id, o.item_name, o.reviewed_at as at from money_shop_orders o
+				where o.recipient_id = ${viewerId}::bigint and o.status = 'approved' and o.user_id not in ${hidden} and o.reviewed_at >= ${lo} and o.reviewed_at < ${hi}
+				order by o.reviewed_at desc limit ${opts.limit}`;
+			for (const r of gifts)
+				out.push({ kind: "money", key: `gift-${r.id}`, at: ms(r.at), users: [String(r.user_id)], path: "/i/xmoney/shop", text: `gave you “${clip(r.item_name)}”` });
+			for (const r of declined)
+				out.push({ kind: "money", key: `declined-${r.id}`, at: ms(r.at), users: [String(r.payer_id)], path: `/i/xmoney/r/${r.id}`, text: `declined your request for ${formatCents(Number(r.amount_cents))}` });
+		}
 		const asked = await sql`select o.id, o.screen_name, r.created_at as at from affiliation_requests r join users o on o.id = r.org_id
 			where r.user_id = ${viewerId}::bigint and r.created_at >= ${lo} and r.created_at < ${hi} order by r.created_at desc limit ${opts.limit}`;
 		for (const r of asked)
@@ -103,7 +132,7 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 			select p.id, greatest(p.created_at, least(p.received_at, p.created_at + interval '1 day')) as created_at, 'quote' from posts p join posts quoted on quoted.id = p.quote_id
 				where quoted.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}`
 			}
-		) x where x.created_at >= ${lo} and x.created_at < ${hi}
+		) x join posts cp on cp.id = x.id where x.created_at >= ${lo} and x.created_at < ${hi} and ${circleMember(viewerId, sql`cp`)}
 		order by x.created_at desc limit ${opts.limit * 2}`;
 	const seen = new Set<string>();
 	for (const r of posts) {
@@ -129,6 +158,8 @@ function message(users: User[], total: number, verb: string, prefix = "") {
 	else if (total === 2 && users.length >= 2) parts = [users[0], " and ", users[1]];
 	else if (total === 3 && users.length >= 3) parts = [users[0], ", ", users[1], " and ", users[2]];
 	else parts = [users[0], ` and ${total - 1} others`];
+	// the client counts these indices in code points, not UTF-16 units: a name
+	// with an emoji or flag measured by .length ran its link over the next words
 	let text = "";
 	const entities = [];
 	for (const part of parts) {
@@ -138,7 +169,8 @@ function message(users: User[], total: number, verb: string, prefix = "") {
 		}
 		const name = names[users.indexOf(part)];
 		const ref = { __typename: "TimelineRichTextUser", type: "TimelineRichTextUser", user_results: { result: userResult(part) } };
-		entities.push({ fromIndex: text.length, toIndex: text.length + name.length, ref });
+		const at = [...text].length;
+		entities.push({ fromIndex: at, toIndex: at + [...name].length, ref });
 		text += name;
 	}
 	if (verb) text += ` ${verb}`;
@@ -177,6 +209,35 @@ function notificationEntry(g: Group, users: Map<string, User>, posts: Map<string
 				component: "urt",
 				element: g.kind === "bell" ? "device_follow_tweet_notification" : `user_${g.kind === "follow" ? "followed" : g.kind === "like" ? "liked_tweet" : "retweeted_tweet"}`,
 			},
+		},
+	};
+}
+
+// "Liza sent you $100.00: “i miss you”", opening the payment
+function moneyEntry(m: Money, users: Map<string, User>) {
+	const from = users.get(m.users[0]);
+	if (!from) return undefined;
+	return {
+		entryId: `notification-${m.key}`,
+		sortIndex: String(m.at),
+		content: {
+			__typename: "TimelineTimelineItem",
+			entryType: "TimelineTimelineItem",
+			itemContent: {
+				__typename: "TimelineNotification",
+				itemType: "TimelineNotification",
+				id: m.key,
+				notification_icon: "bell_icon",
+				rich_message: message([from], 1, m.text),
+				notification_url: { url: `${IN_APP}${m.path}`, urlType: "ExternalUrl" },
+				template: {
+					__typename: "TimelineNotificationAggregateUserActions",
+					target_objects: [],
+					from_users: [{ __typename: "TimelineNotificationUserRef", user_results: { result: userResult(from) } }],
+				},
+				timestamp_ms: m.at,
+			},
+			clientEventInfo: { component: "urt", element: "generic_notification" },
 		},
 	};
 }
@@ -242,7 +303,7 @@ export async function notificationsTimeline(viewer: User, opts: { type: string; 
 	const postIds = [...new Set(list.map((i) => (i.kind === "staff" ? undefined : i.postId)).filter((id): id is string => !!id))];
 	const [users, posts] = await Promise.all([usersByIds(viewer.id, userIds), postsByIds(viewer.id, postIds)]);
 	const entries = list
-		.map((i) => (i.kind === "post" ? postEntry(i, posts) : i.kind === "staff" ? staffEntry(i) : notificationEntry(i, users, posts, viewer)))
+		.map((i) => (i.kind === "post" ? postEntry(i, posts) : i.kind === "staff" ? staffEntry(i) : i.kind === "money" ? moneyEntry(i, users) : notificationEntry(i, users, posts, viewer)))
 		.filter((e) => !!e);
 
 	const [{ seen }] = await sql`select notifications_seen_at as seen from users where id = ${viewer.id}::bigint`;
@@ -286,7 +347,7 @@ export async function markSeen(viewerId: string, cursorOrIndex: string | null) {
 }
 
 // For push: what arrived after `sinceMs`, as text and an in-app path
-export type PushItem = { kind: "like" | "repost" | "follow" | "bell" | "reply" | "mention" | "quote" | "staff"; key: string; at: number; text: string; url: string };
+export type PushItem = { kind: "like" | "repost" | "follow" | "bell" | "reply" | "mention" | "quote" | "staff" | "money"; key: string; at: number; text: string; url: string };
 
 export async function pushItems(viewerId: string, sinceMs: number): Promise<PushItem[]> {
 	const list = await items(viewerId, { after: sinceMs, limit: 20, mentionsOnly: false });
@@ -300,6 +361,11 @@ export async function pushItems(viewerId: string, sinceMs: number): Promise<Push
 	for (const i of list) {
 		if (i.kind === "staff") {
 			out.push({ kind: "staff", key: i.key, at: i.at, text: i.text, url: i.url ?? "/account/notices" });
+			continue;
+		}
+		if (i.kind === "money") {
+			const from = users.get(i.users[0]);
+			out.push({ kind: "money", key: i.key, at: i.at, text: `${name(from)} ${i.text}`, url: i.path });
 			continue;
 		}
 		const post = i.postId ? posts.get(i.postId) : undefined;

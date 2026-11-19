@@ -21,12 +21,15 @@ async function localSuperadmin(viewer: Viewer | undefined) {
 	return u?.role === "admin" ? u : undefined;
 }
 
-async function reauthenticate(u: { id: string; password_hash: string; totp_enabled: boolean }, form: FormData): Promise<string | undefined> {
+// the password and a fresh two-factor code again, before anything that reaches
+// past this instance or swaps its code (self-update.ts); one budget of tries
+// for both. A refusal comes back as the text to show.
+export async function reauthenticate(u: { id: string; password_hash: string; totp_enabled: boolean }, passwordInput: unknown, codeInput: unknown): Promise<string | undefined> {
 	const h = hit("password", `superadmin:${u.id}`);
 	if (!h.ok) return "Too many tries. Wait a few minutes.";
 	if (!u.totp_enabled) return "Turn on two-factor authentication first, at /account/2fa.";
-	const password = String(form.get("password") ?? "").slice(0, 1024);
-	const code = String(form.get("code") ?? "").replace(/\s/g, "").slice(0, 20);
+	const password = String(passwordInput ?? "").slice(0, 1024);
+	const code = String(codeInput ?? "").replace(/\s/g, "").slice(0, 20);
 	if (!(await Bun.password.verify(password, u.password_hash).catch(() => false))) return "The password or the code isn't right.";
 	const now = Date.now();
 	for (const [k, at] of usedCodes) if (now - at > 120_000) usedCodes.delete(k);
@@ -58,6 +61,8 @@ function homePage(req: Request, viewer: Viewer, message = "") {
 <form method="post" action="/federation/superadmin/enter">
 <input type="hidden" name="csrf" value="${esc(viewer.csrf)}">
 <label>Instance <select name="instance" required>${options}</select></label>
+<label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+<label>Two-factor code <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
 <button>Open admin panel</button>
 </form>
 <h1>Emergency defederation</h1>
@@ -87,6 +92,10 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 		if (String(form.get("csrf") ?? "") !== viewer.csrf) return homePage(req, viewer, "That form is out of date. Try again.");
 		const h = hit("auth", `superadmin:${viewer.id}`);
 		if (!h.ok) return limitedResponse(h);
+		// the ticket is an admin session on another instance: a session someone
+		// took here must not be enough to sign one
+		const refused = await reauthenticate(u, form.get("password"), form.get("code"));
+		if (refused) return homePage(req, viewer, refused);
 		const now = Math.floor(Date.now() / 1000);
 		const ticket = seal({ typ: "xitter-superadmin-v1", iss: INSTANCE_ID, aud: instance, sub: viewer.screen_name, sub_id: viewer.id, name: viewer.name, iat: now, exp: now + TICKET_SECONDS, nonce: b64url(randomBytes(18)) });
 		return accountPage({
@@ -98,7 +107,7 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 <script>document.getElementById("enter").submit()</script>`,
 		});
 	}
-	const refused = await reauthenticate(u, form);
+	const refused = await reauthenticate(u, form.get("password"), form.get("code"));
 	if (refused) return homePage(req, viewer, refused);
 	if (url.pathname === "/federation/superadmin/emergency") {
 		const action = form.get("action") === "lift" ? "lift" : "block";

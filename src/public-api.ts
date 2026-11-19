@@ -9,15 +9,37 @@ import { BodyTooLarge, boundedBody } from "./api-input";
 import { accountPage, esc } from "./account-page";
 import { type User, type Viewer } from "./auth";
 import { PUBLIC_ORIGIN } from "./config";
+import { pronounsValue } from "./pronouns";
 import { sql } from "./db";
 import { callOperation } from "./graphql";
 import { isId, newId } from "./ids";
 import { absolute, mediaUpload, mediaUrl, posterUrl } from "./media";
-import { type PostRow, badgeList, isOrganization, isVerified, verifiedSince } from "./model";
-import { PostError, feed, getPost, postsByIds, replies, type FeedItem } from "./posts";
+import { type PostRow, badgeList, isOrganization, isVerified, shownVerifiedType, verifiedSince } from "./model";
+import { PostError, feed, getPost, likerIds, postsByIds, replies, type FeedItem } from "./posts";
+import { setProfileImage, updatePronouns, updateProfileText } from "./rest";
+import { ReplyControlError } from "./reply-controls";
 import { type Bucket, limitHeaders, limitedResponse, noteRefusal, take } from "./ratelimit";
 import { searchPosts, searchUsers } from "./search";
-import { settings } from "./settings";
+import { feature, settings } from "./settings";
+import {
+	MoneyError,
+	NOTE_MAX,
+	type Party,
+	type Payment,
+	type Request as MoneyRequest,
+	acceptDisclaimer,
+	balanceOf,
+	closeRequest,
+	disclaimerAccepted,
+	disclaimerText,
+	economy,
+	paymentUrl,
+	payments,
+	requestMoney,
+	requestUrl,
+	requests,
+	sendMoney,
+} from "./money";
 import { badgeUrl, followList, setFollow, userByName, usersByIds } from "./users";
 
 const hash = (token: string) => new Bun.CryptoHasher("sha256").update(token).digest("hex");
@@ -78,11 +100,12 @@ function userJson(u: User) {
 		screen_name: u.screen_name,
 		name: u.name,
 		bio: u.bio ?? "",
+		pronouns: pronounsValue(u.pronouns),
 		location: u.location ?? "",
 		website: u.website || null,
 		avatar_url: absolute(u.avatar_url),
 		banner_url: absolute(u.banner_url),
-		verified_type: u.verified_type,
+		verified_type: shownVerifiedType(u),
 		// what the web client shows, from the same rules (model.ts): a checkmark
 		// also for an organisation's affiliates, and its "Verified since" date
 		verified: isVerified(u),
@@ -258,26 +281,214 @@ async function uploadMedia(req: Request, v: Viewer) {
 	return { media_id: id, processing: done.processing_info?.state ?? "succeeded" };
 }
 
+// ---- Equicoins (money.ts): the instance's own play money, with no cash value
+
+// on for this instance and, before any money moves, the disclaimer accepted
+async function moneyOn(v: Viewer, { accepted = true } = {}) {
+	if (!feature("money")) throw new ApiError(404, `Equicoins isn't on for ${settings().instance_name}.`);
+	if (accepted && !(await disclaimerAccepted(v.id))) throw new ApiError(403, "Accept Equicoins' disclaimer first: POST /money/disclaimer.");
+}
+async function moneyCall<T>(f: () => Promise<T>): Promise<T> {
+	try {
+		return await f();
+	} catch (e) {
+		if (e instanceof MoneyError) throw new ApiError(400, e.message);
+		throw e;
+	}
+}
+
+// the accounts on either side, in the API's account shape; one the viewer
+// can't see any more (a block since) keeps its name and picture
+async function moneyPeople(v: Viewer, sides: Party[]) {
+	const found = await usersByIds(v.id, [...new Set(sides.map((p) => p.id))]);
+	return (p: Party) => {
+		const u = found.get(p.id);
+		return u ? userJson(u) : { id: p.id, screen_name: p.screen_name, name: p.name, avatar_url: p.avatar };
+	};
+}
+
+async function paymentsJson(v: Viewer, list: Payment[]) {
+	const who = await moneyPeople(v, list.flatMap((t) => [t.sender, t.recipient]));
+	return list.map((t) => ({
+		id: t.id,
+		amount_cents: t.amount,
+		note: t.note,
+		created_at: iso(t.at),
+		direction: t.sender.id === v.id ? "sent" : t.recipient.id === v.id ? "received" : null,
+		sender: who(t.sender),
+		recipient: who(t.recipient),
+		// paid to a business in merchant mode: X shows it as a purchase there
+		merchant: t.recipient.merchant ? { name: t.recipient.merchant.name, banner_url: t.recipient.merchant.banner } : null,
+		reversed: !!t.reversed,
+		url: paymentUrl(t.id),
+	}));
+}
+
+async function requestsJson(v: Viewer, list: MoneyRequest[]) {
+	const who = await moneyPeople(v, list.flatMap((q) => [q.requester, ...(q.payer ? [q.payer] : [])]));
+	return list.map((q) => {
+		const open = q.status === "open";
+		return {
+			id: q.id,
+			amount_cents: q.amount,
+			note: q.note,
+			status: q.status,
+			created_at: iso(q.at),
+			requester: who(q.requester),
+			// null: anyone may pay it (a "Pay @name" card)
+			payer: q.payer ? who(q.payer) : null,
+			paid_count: q.paidCount,
+			paid_cents: q.paidCents,
+			url: requestUrl(q.id),
+			can_pay: open && q.requester.id !== v.id && (!q.payer || q.payer.id === v.id),
+			can_decline: open && q.payer?.id === v.id,
+			can_cancel: open && q.requester.id === v.id,
+		};
+	});
+}
+
+const onePayment = async (v: Viewer, id: string) => {
+	const t = (await payments([id], v.id)).get(id);
+	if (!t) throw new ApiError(404, "No payment with that id, or you can't see it.");
+	return (await paymentsJson(v, [t]))[0];
+};
+const oneRequest = async (v: Viewer, id: string) => {
+	const q = (await requests([id], v.id)).get(id);
+	if (!q) throw new ApiError(404, "No request with that id, or you can't see it.");
+	return (await requestsJson(v, [q]))[0];
+};
+const centsOf = (value: unknown, what: string) => {
+	const n = typeof value === "string" && value.trim() ? Number(value) : value;
+	if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0) throw new ApiError(400, `${what} is a whole number of cents over 0.`);
+	return n;
+};
+
+const MONEY_ROUTES: Route[] = [
+	{
+		method: "GET", pattern: /^\/money$/, scope: "read",
+		run: async (v) => {
+			await moneyOn(v, { accepted: false });
+			const m = economy();
+			return { data: { name: `${settings().instance_name} Equicoins`, balance_cents: await balanceOf(v.id), disclaimer_accepted: await disclaimerAccepted(v.id), disclaimer: disclaimerText(), max_transfer_cents: m.max_transfer_cents, like_cents: m.like_cents, note_max: NOTE_MAX } };
+		},
+	},
+	{
+		method: "POST", pattern: /^\/money\/disclaimer$/, scope: "write",
+		run: async (v) => {
+			await moneyOn(v, { accepted: false });
+			await acceptDisclaimer(v.id);
+			return { data: { disclaimer_accepted: true } };
+		},
+	},
+	{
+		method: "GET", pattern: /^\/money\/activity$/, scope: "read",
+		run: async (v, _m, _r, url) => {
+			await moneyOn(v);
+			const limit = limitOf(url), cursor = cursorOf(url);
+			const rows = await sql`select id::text from money_transfers where (sender_id = ${v.id}::bigint or recipient_id = ${v.id}::bigint)
+				${cursor ? sql`and id < ${cursor}::bigint` : sql``} order by id desc limit ${limit}`;
+			const ids = rows.map((r: { id: string }) => r.id);
+			const found = await payments(ids);
+			const data = await paymentsJson(v, ids.map((id: string) => found.get(id)).filter((t: Payment | undefined): t is Payment => !!t));
+			// likes paid, by day, on the first page only
+			const earnings = cursor ? undefined : (await sql`select date_trunc('day', created_at) as day, count(*)::int as likes, sum(cents)::bigint as cents
+				from money_like_rewards where author_id = ${v.id}::bigint group by 1 order by 1 desc limit 30`).map((r: any) => ({ day: iso(r.day)!.slice(0, 10), likes: r.likes, cents: Number(r.cents) }));
+			return { data, ...(earnings ? { earnings } : {}), next_cursor: ids.length >= limit ? ids[ids.length - 1] : null };
+		},
+	},
+	{
+		method: "GET", pattern: /^\/money\/requests$/, scope: "read",
+		run: async (v) => {
+			await moneyOn(v);
+			// what waits on the viewer, and what it's waiting on from others
+			const rows = await sql`select id::text from money_requests where status = 'open'
+				and (payer_id = ${v.id}::bigint or (requester_id = ${v.id}::bigint and payer_id is not null)) order by id desc limit 40`;
+			const ids = rows.map((r: { id: string }) => r.id);
+			const found = await requests(ids);
+			return { data: await requestsJson(v, ids.map((id: string) => found.get(id)).filter((q: MoneyRequest | undefined): q is MoneyRequest => !!q)) };
+		},
+	},
+	{
+		method: "POST", pattern: /^\/money\/send$/, scope: "write", bucket: "write",
+		run: async (v, _m, req) => {
+			await moneyOn(v);
+			const b = await body(req);
+			const to = typeof b.to === "string" ? b.to : "";
+			const key = typeof b.idempotency_key === "string" ? b.idempotency_key : "";
+			if (b.request_id !== undefined && !isId(String(b.request_id))) throw new ApiError(400, "request_id is a request's id.");
+			const sent = await moneyCall(() => sendMoney(v.id, to, centsOf(b.amount_cents, "amount_cents"), typeof b.note === "string" ? b.note : "", key, b.request_id !== undefined ? String(b.request_id) : undefined));
+			return { data: await onePayment(v, sent.id), status: sent.repeated ? 200 : 201 };
+		},
+	},
+	{
+		method: "POST", pattern: /^\/money\/requests$/, scope: "write", bucket: "write",
+		run: async (v, _m, req) => {
+			await moneyOn(v);
+			const b = await body(req);
+			const amount = b.amount_cents === undefined || b.amount_cents === null || b.amount_cents === "" ? null : centsOf(b.amount_cents, "amount_cents");
+			const id = await moneyCall(() => requestMoney(v.id, typeof b.from === "string" ? b.from : "", amount ? (amount / 100).toFixed(2) : "", typeof b.note === "string" ? b.note : ""));
+			return { data: await oneRequest(v, id), status: 201 };
+		},
+	},
+	...(["decline", "cancel"] as const).map((action): Route => ({
+		method: "POST", pattern: new RegExp(`^/money/requests/(\\d{1,19})/${action}$`), scope: "write", bucket: "write",
+		run: async (v, m) => {
+			await moneyOn(v);
+			if (!(await closeRequest(v.id, m[1], action))) throw new ApiError(409, action === "decline" ? "That request isn't open to you." : "That request isn't yours, or isn't open.");
+			return { data: await oneRequest(v, m[1]) };
+		},
+	})),
+	{ method: "GET", pattern: /^\/money\/payments\/(\d{1,19})$/, scope: "read", run: async (v, m) => (await moneyOn(v, { accepted: false }), { data: await onePayment(v, m[1]) }) },
+	{ method: "GET", pattern: /^\/money\/requests\/(\d{1,19})$/, scope: "read", run: async (v, m) => (await moneyOn(v, { accepted: false }), { data: await oneRequest(v, m[1]) }) },
+];
+
 type Route = { method: string; pattern: RegExp; scope: "read" | "write"; bucket?: Bucket; run: (v: Viewer, m: RegExpExecArray, req: Request, url: URL) => Promise<unknown> };
 
 const op = async (name: string, v: Viewer, vars: Record<string, unknown>) => {
 	try {
 		return await callOperation(name, v, vars);
 	} catch (e) {
-		if (e instanceof PostError) throw new ApiError(e.code === 144 ? 404 : 400, e.message);
+		if (e instanceof PostError || e instanceof ReplyControlError) throw new ApiError(e.code === 144 ? 404 : 400, e.message);
 		throw e;
 	}
 };
 
 const ROUTES: Route[] = [
 	{ method: "GET", pattern: /^\/me$/, scope: "read", run: async (v) => ({ data: userJson((await userByName(v.id, v.screen_name))!) }) },
+	{
+		// edit the profile: name, bio, pronouns, location, website (empty string
+		// clears), avatar_media_id / banner_media_id from POST /media, remove_banner: true
+		method: "PATCH", pattern: /^\/me$/, scope: "write",
+		run: async (v, _m, req) => {
+			const b = await body(req);
+			const text: Record<string, string> = {};
+			for (const [key, web] of [["name", "name"], ["bio", "description"], ["location", "location"], ["website", "url"]] as const) {
+				if (b[key] === undefined || b[key] === null) continue;
+				if (typeof b[key] !== "string") throw new ApiError(400, `${key} is a string.`);
+				text[web] = b[key];
+			}
+			if (b.pronouns !== undefined && b.pronouns !== null && typeof b.pronouns !== "string") throw new ApiError(400, "pronouns is a string.");
+			if (b.avatar_media_id !== undefined && !isId(String(b.avatar_media_id))) throw new ApiError(400, "avatar_media_id is a media id.");
+			if (b.banner_media_id !== undefined && !isId(String(b.banner_media_id))) throw new ApiError(400, "banner_media_id is a media id.");
+			const problem =
+				(Object.keys(text).length ? await updateProfileText(v, text) : null) ??
+				(typeof b.pronouns === "string" ? await updatePronouns(v, b.pronouns) : null) ??
+				(b.avatar_media_id !== undefined ? await setProfileImage(v, "avatar", String(b.avatar_media_id)) : null) ??
+				(b.banner_media_id !== undefined ? await setProfileImage(v, "banner", String(b.banner_media_id)) : null);
+			if (problem) throw new ApiError(400, problem);
+			if (b.remove_banner === true) await sql`update users set banner_url = null where id = ${v.id}::bigint`;
+			return { data: userJson((await userByName(v.id, v.screen_name))!) };
+		},
+	},
 	{ method: "GET", pattern: /^\/users\/([^/]+)$/, scope: "read", run: async (v, m) => ({ data: userJson(await userOr404(v, m[1])) }) },
 	{
 		method: "GET", pattern: /^\/users\/([^/]+)\/posts$/, scope: "read",
 		run: async (v, m, _r, url) => {
 			const u = await userOr404(v, m[1]);
 			const limit = limitOf(url);
-			return page(await feed({ viewerId: v.id, authors: { user: u.id }, replies: url.searchParams.get("replies") === "true", kinds: "both", limit, before: cursorOf(url) }), limit);
+			// replies=true mixes replies in, replies=only is a profile's Replies tab
+			const r = url.searchParams.get("replies");
+			return page(await feed({ viewerId: v.id, authors: { user: u.id }, replies: r === "true" || r === "only", onlyReplies: r === "only", kinds: "both", limit, before: cursorOf(url) }), limit);
 		},
 	},
 	{
@@ -300,6 +511,15 @@ const ROUTES: Route[] = [
 		run: async (v, m, _r, url) => {
 			await postOr404(v, m[1]);
 			return { data: (await replies(v.id, m[1], limitOf(url))).map((p) => postJson(p)) };
+		},
+	},
+	{
+		method: "GET", pattern: /^\/posts\/(\d{1,19})\/likes$/, scope: "read",
+		run: async (v, m, _r, url) => {
+			await postOr404(v, m[1]);
+			const ids = await likerIds(v.id, m[1], limitOf(url, 200));
+			const users = await usersByIds(v.id, ids);
+			return { data: ids.flatMap((id) => (users.has(id) ? [userJson(users.get(id)!)] : [])) };
 		},
 	},
 	{
@@ -390,6 +610,7 @@ const ROUTES: Route[] = [
 		if (!isId(m[1])) throw new ApiError(404, "Unknown upload.");
 		return { data: mediaResult(m[1], await callMedia(v, { command: "STATUS", media_id: m[1] })) };
 	} },
+	...MONEY_ROUTES,
 ];
 
 export async function publicApi(req: Request, url: URL): Promise<Response> {
@@ -411,6 +632,8 @@ export async function publicApi(req: Request, url: URL): Promise<Response> {
 	}
 	if (!route || !match) return withCors(fail(404, "No such endpoint. See /api for the list."));
 	if (route.scope === "write" && scope !== "write") return withCors(fail(403, "This token can only read."));
+	// the same standing as in the app (restricted-page.ts): reading goes on, nothing else
+	if (route.scope === "write" && viewer.status === "restricted") return withCors(fail(403, "Your account can't interact right now."));
 	if (settings().operations.maintenance) return withCors(fail(503, settings().operations.message || "The instance is under maintenance."));
 
 	const where = `api ${route.method} ${route.pattern.source}`;
@@ -431,7 +654,7 @@ export async function publicApi(req: Request, url: URL): Promise<Response> {
 }
 
 // tokens are sent explicitly, never as cookies, so any site may call the API
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type", "access-control-allow-methods": "GET, POST, DELETE, OPTIONS", "access-control-max-age": "86400" };
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type", "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS", "access-control-max-age": "86400" };
 function withCors(res: Response) {
 	for (const [k, v] of Object.entries(CORS)) res.headers.set(k, v);
 	return res;

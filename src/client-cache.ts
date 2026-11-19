@@ -9,7 +9,38 @@ export const CDN_ORIGIN = "https://abs.twimg.com";
 // Builds from before the CDN's retention are fetched from the Internet Archive
 // instead: asset names are content-hashed, so any capture of the URL is the file.
 const ARCHIVE_ORIGIN = "https://web.archive.org/web/2id_";
+// where the client's files live on the CDN; nothing else is fetched for it
+const CDN_PATHS = /^\/(responsive-web|x-web|sticky|emoji|fonts|hashflags|images|favicons)\//;
+// the biggest file a build has is a few MB; a wasm chat build about ten
+const MAX_FILE = 64 * 1024 * 1024;
 const downloads = new Map<string, Promise<Buffer | undefined>>();
+
+export const clientPathAllowed = (cdnPath: string) => CDN_PATHS.test(cdnPath);
+
+export function hasClientFile(cdnPath: string): boolean {
+	const p = localPath(cdnPath);
+	return !!p && existsSync(p) && statSync(p).isFile();
+}
+
+// the body in pieces, or undefined once it passes max
+async function readUpTo(res: Response, max: number): Promise<Buffer | undefined> {
+	if (Number(res.headers.get("content-length") ?? 0) > max) return undefined;
+	const reader = res.body?.getReader();
+	if (!reader) return Buffer.alloc(0);
+	const parts: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.length;
+		if (size > max) {
+			await reader.cancel().catch(() => {});
+			return undefined;
+		}
+		parts.push(value);
+	}
+	return Buffer.concat(parts);
+}
 
 function localPath(cdnPath: string): string | undefined {
 	const clean = normalize(cdnPath).replace(/^([/\\])+/, "");
@@ -28,18 +59,19 @@ export async function getClientFile(cdnPath: string, allowFetch = true): Promise
 	const cached = readCached(cdnPath);
 	if (cached || !allowFetch) return cached;
 	const p = localPath(cdnPath);
-	if (!p || (existsSync(p) && !statSync(p).isFile())) return undefined;
+	if (!p || !clientPathAllowed(cdnPath) || (existsSync(p) && !statSync(p).isFile())) return undefined;
 	let pending = downloads.get(p);
 	if (!pending) {
 		pending = (async () => {
-			let res = await fetch(CDN_ORIGIN + cdnPath).catch(() => undefined);
+			let res = await fetch(CDN_ORIGIN + cdnPath, { signal: AbortSignal.timeout(60_000) }).catch(() => undefined);
 			// 2018 pages used the abs-0 alias, which is what the archive captured
 			for (const host of [CDN_ORIGIN, "https://abs-0.twimg.com"])
-				if (!res?.ok) res = await fetch(`${ARCHIVE_ORIGIN}/${host}${cdnPath}`, { redirect: "follow" }).catch(() => undefined);
+				if (!res?.ok) res = await fetch(`${ARCHIVE_ORIGIN}/${host}${cdnPath}`, { redirect: "follow", signal: AbortSignal.timeout(60_000) }).catch(() => undefined);
 			if (!res?.ok) return undefined;
 			// the archive answers a missing file with a page, not a 404
 			if (/\.js$/.test(cdnPath) && (res.headers.get("content-type") ?? "").includes("text/html")) return undefined;
-			const buf = Buffer.from(await res.arrayBuffer());
+			const buf = await readUpTo(res, MAX_FILE);
+			if (!buf) return undefined;
 			mkdirSync(dirname(p), { recursive: true });
 			writeFileSync(p, buf);
 			return buf;

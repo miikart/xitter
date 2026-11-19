@@ -4,8 +4,9 @@
 // and notifications. Muted words hide matching posts on the surfaces chosen.
 
 import { sql } from "./db";
+import { replyDenied } from "./reply-controls";
 import { newId } from "./ids";
-import { staffViewer } from "./staff-access";
+import { revealedSuspended, staffViewer } from "./staff-access";
 
 // accounts the viewer blocked or was blocked by
 export const blockedFor = (viewerId: string) =>
@@ -13,8 +14,13 @@ export const blockedFor = (viewerId: string) =>
 		union all select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
 
 const gone = sql`(status = 'suspended' or deactivated_at is not null or instance_blocked)`;
+// gone, except a suspended account staff opened (staff-access.ts revealSuspended)
+const goneHere = () => {
+	const id = revealedSuspended();
+	return id ? sql`(${gone} and not (id = ${id}::bigint and status = 'suspended'))` : gone;
+};
 export const outOfView = (viewerId: string) =>
-	sql`(select id from users where ${gone} or (status = 'limited' and id <> ${viewerId}::bigint
+	sql`(select id from users where ${goneHere()} or (status = 'limited' and id <> ${viewerId}::bigint
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
 		and not ${staffViewer(viewerId)}))`;
 
@@ -25,7 +31,7 @@ export const protectedFor = (viewerId: string) =>
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
 		and not ${staffViewer(viewerId)})`;
 
-export const suspendedFor = (viewerId: string) => sql`(select id from users where ${gone} and id <> ${viewerId}::bigint)`;
+export const suspendedFor = (viewerId: string) => sql`(select id from users where ${goneHere()} and id <> ${viewerId}::bigint)`;
 
 // Accounts from other instances the viewer hid, all of them or some instances
 // (Settings > Other instances): they stay out of timelines, replies, search and
@@ -76,10 +82,7 @@ export async function setBlock(blockerId: string, blockedId: string, on: boolean
 }
 
 export async function replyLimited(conversationId: string, userId: string, db: typeof sql = sql): Promise<boolean> {
-	const [limited] = await db`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and r.reply_policy is not null and r.user_id <> ${userId}::bigint and not (
-			(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${userId}::bigint))
-			or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${userId}::bigint))
-			or (r.reply_policy = 'Verified' and exists (select 1 from users x where x.id = ${userId}::bigint and (x.verified_type is not null or exists (select 1 from affiliations af where af.user_id = x.id)))))) as no`;
+	const [limited] = await db`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and ${replyDenied(userId)}) as no`;
 	return limited.no;
 }
 

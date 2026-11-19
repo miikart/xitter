@@ -24,7 +24,7 @@ const stat = (name: string) => sql`coalesce((select s.${sql(name)} from user_sta
 // same account never reaches the client in two different states.
 export const userCols = (viewerId: string) => sql`
 	u.id as a_id, u.screen_name as a_screen_name, u.name as a_name, u.bio as a_bio, u.location as a_location,
-	u.website as a_website, u.avatar_url as a_avatar_url, u.banner_url as a_banner_url, u.pinned_post_id as a_pinned_post_id, u.protected as a_protected, u.verified_type as a_verified_type, u.verified_at as a_verified_at, u.translator as a_translator, u.flag as a_flag, u.status as a_status, u.instance as a_instance, coalesce(u.shown_created_at, u.created_at) as a_created_at,
+	u.website as a_website, u.avatar_url as a_avatar_url, u.banner_url as a_banner_url, u.pinned_post_id as a_pinned_post_id, u.protected as a_protected, u.verified_type as a_verified_type, u.verified_at as a_verified_at, u.translator as a_translator, u.flag as a_flag, u.pronouns as a_pronouns, u.status as a_status, u.instance as a_instance, coalesce(u.shown_created_at, u.created_at) as a_created_at,
 	${badgesOf(sql`u.id`)} as a_badges, u.remote_badges as a_remote_badges,
 	greatest((u.remote_counts->>'posts')::int, ${stat("posts")}) as a_posts,
 	(select json_build_object('id', o.id::text, 'name', o.name, 'screen_name', o.screen_name, 'avatar_url', case when o.org_badge_id is not null then '/public/badge-' || o.org_badge_id::text || '.png' else coalesce(o.remote_org_badge, o.avatar_url) end, 'since', af.created_at)
@@ -65,6 +65,7 @@ export function toUser(r: any): User {
 		verified_at: r.a_verified_at ?? null,
 		translator: r.a_translator ?? null,
 		flag: r.a_flag,
+		pronouns: r.a_pronouns ?? null,
 		badges: r.a_badges ?? [],
 		remote_badges: r.a_remote_badges ?? [],
 		status: r.a_status,
@@ -165,7 +166,7 @@ export async function knownFollowerCount(viewerId: string, userId: string): Prom
 	return r?.n ?? 0;
 }
 
-export async function followList(viewerId: string, userId: string, kind: "following" | "followers" | "verified_followers" | "known_followers", limit = 200): Promise<User[]> {
+export async function followList(viewerId: string, userId: string, kind: "following" | "followers" | "verified_followers" | "known_followers", limit = 200, offset = 0): Promise<User[]> {
 	// a protected account's lists are for itself and its followers
 	if (userId !== viewerId) {
 		const [hidden] = await sql`select 1 from users u where u.id = ${userId}::bigint and not ${staffViewer(viewerId)} and (
@@ -175,13 +176,13 @@ export async function followList(viewerId: string, userId: string, kind: "follow
 	}
 	const rows =
 		kind === "known_followers"
-			? await sql`select ${userCols(viewerId)} ${knownFollowers(viewerId, userId)} order by f.created_at desc limit ${limit}`
+			? await sql`select ${userCols(viewerId)} ${knownFollowers(viewerId, userId)} order by f.created_at desc, f.follower_id desc limit ${limit} offset ${offset}`
 			: kind === "following"
 			? await sql`select ${userCols(viewerId)} from follows f join users u on u.id = f.followee_id
-				where f.follower_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)} order by f.created_at desc limit ${limit}`
+				where f.follower_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)} order by f.created_at desc, f.followee_id desc limit ${limit} offset ${offset}`
 			: await sql`select ${userCols(viewerId)} from follows f join users u on u.id = f.follower_id
 				where f.followee_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)}
-				${kind === "verified_followers" ? sql`and u.verified_type is not null` : sql``} order by f.created_at desc limit ${limit}`;
+				${kind === "verified_followers" ? sql`and u.verified_type is not null` : sql``} order by f.created_at desc, f.follower_id desc limit ${limit} offset ${offset}`;
 	return rows.map(toUser);
 }
 

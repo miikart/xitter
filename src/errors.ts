@@ -59,15 +59,38 @@ export async function clientError(req: Request, viewer: Viewer): Promise<Respons
 }
 
 // the page's uncaught errors, a few per page load; the client's own telemetry
-// goes to X's formats, which aren't kept
+// goes to X's formats, which aren't kept. Requests that never reached the
+// server (the browser offline: code 1004, or the fetch itself failing) say
+// nothing about the server, so they're dropped as the client's own reporter does.
 export const ERROR_SCRIPT = `(function(){
-	var left=10,seen={};
+	var left=10,seen={},offline=/HTTP-0 codes:\\[1004\\]|Failed to fetch|Load failed|NetworkError when attempting to fetch|TypeError: network error/i,resizeLoop=/^ResizeObserver loop completed with undelivered notifications\\.?$/;
+	// a restricted account's refused action opens the page saying why; only
+	// right after a click or key, so a call the client makes on its own can't
+	// keep sending the account away from what it reads
+	var acted=0;
+	["pointerdown","keydown"].forEach(function(t){window.addEventListener(t,function(){acted=Date.now()},true)});
+	function refused(status,b){
+		if(status!==403||Date.now()-acted>5000||location.pathname==="/account/access")return;
+		if(b&&b.errors&&b.errors.some(function(e){return e&&e.code===326}))location.assign("/account/access");
+	}
+	function restricted(r){
+		if(r.status===403)r.clone().json().then(function(b){refused(r.status,b)}).catch(function(){});
+	}
 	function send(message,stack){
-		if(!message||left<=0||seen[message])return;
+		// Chromium reports this when it defers observer work to the next frame;
+		// it is a browser warning, not an uncaught application exception.
+		if(!message||resizeLoop.test(String(message))||left<=0||seen[message])return;
+		if(navigator.onLine===false||offline.test(String(message)))return;
 		left--;seen[message]=1;
 		var csrf=(document.cookie.match(/(?:^|; )ct0=([^;]+)/)||[])[1]||"";
 		try{fetch("/i/api/xitter/client_error",{method:"POST",credentials:"same-origin",keepalive:true,headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({message:String(message),stack:String(stack||""),page:location.href})})}catch(e){}
 	}
 	window.addEventListener("error",function(e){if(e.error||e.message)send(e.message,e.error&&e.error.stack)});
 	window.addEventListener("unhandledrejection",function(e){var r=e.reason;send(r&&r.message||String(r),r&&r.stack)});
+	var fetch0=window.fetch;
+	window.fetch=function(){var p=fetch0.apply(this,arguments);p.then(restricted,function(){});return p};
+	var open0=XMLHttpRequest.prototype.open;
+	XMLHttpRequest.prototype.open=function(){this.addEventListener("load",function(){
+		if(this.status===403)try{refused(this.status,JSON.parse(this.responseText))}catch(e){}
+	});return open0.apply(this,arguments)};
 })();`;

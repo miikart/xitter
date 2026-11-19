@@ -64,6 +64,25 @@ async function relationship(viewer: Viewer, targetId: string) {
 
 const profileError = (message: string) => Response.json({ errors: [{ code: 120, message }] }, { status: 403 });
 
+// the problem with the new pronouns, or undefined once they are saved
+export async function updatePronouns(viewer: Viewer, raw: string): Promise<string | undefined> {
+	const value = oneLine(raw).trim();
+	const problem = pronounsProblem(value);
+	if (problem) return problem;
+	const hate = hateIn(value);
+	if (hate) {
+		await automodStrike(viewer.id, hate, "profile", value);
+		return "Your pronouns contain a slur or hate speech this instance doesn't allow.";
+	}
+	if (blockedWordIn(value)) {
+		if (!viewer.role) await suspendForName(viewer.id, value);
+		return "Your pronouns contain a word this instance doesn't allow.";
+	}
+	if (hasBlockedPhrase(value)) return "Your pronouns contain a phrase this instance doesn't allow.";
+	await sql`update users set pronouns = ${value || null} where id = ${viewer.id}::bigint`;
+	return undefined;
+}
+
 async function form(req: Request): Promise<Record<string, string>> {
 	const f = await req.formData().catch(() => undefined);
 	const out: Record<string, string> = {};
@@ -91,31 +110,8 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 	}
 
 	if (m[1] === "update_profile") {
-		const limits: Record<string, [string, number]> = { name: ["name", 50], description: ["bio", 160], location: ["location", 30], url: ["website", 100] };
-		// every field is checked before any is saved
-		const changes: Record<string, string> = {};
-		for (const [field, [column, max]] of Object.entries(limits)) {
-			if (!(field in f)) continue;
-			const value = field === "description" ? cleanText(f[field], { lines: 6 }) : oneLine(f[field]);
-			if ([...value].length > max) return profileError(`${field} is limited to ${max} characters.`);
-			if (field === "name" && !value) return profileError("Name can't be blank.");
-			if (field === "url" && value && !/^https?:\/\/\S+$/.test(value)) return profileError("Website must be an http or https address.");
-			const hate = field === "name" ? hateInName(value) : hateIn(value);
-			if (hate) {
-				await automodStrike(viewer.id, hate, field === "name" ? "name" : "profile", value);
-				return profileError(field === "name" ? "That name isn't allowed here." : "Your profile contains a slur or hate speech this instance doesn't allow.");
-			}
-			// a blocked word (names.ts): suspended, staff only refused; the
-			// name ignores spacing, the longer fields are read word by word
-			if (field === "name" ? blockedNameIn(value) : blockedWordIn(value)) {
-				if (!viewer.role) await suspendForName(viewer.id, value);
-				return profileError(field === "name" ? "That name isn't allowed here." : "Your profile contains a word this instance doesn't allow.");
-			}
-			if (hasBlockedPhrase(value)) return profileError("Your profile contains a phrase this instance doesn't allow.");
-			changes[column] = value;
-		}
-		if (Object.keys(changes).length) await sql`update users set ${sql(changes)} where id = ${viewer.id}::bigint`;
-		return changedUser(viewer);
+		const problem = await updateProfileText(viewer, f);
+		return problem ? profileError(problem) : changedUser(viewer);
 	}
 	if (m[1] === "update_flag") {
 		if (unknownFlag(f.flag)) return profileError("Unknown flag.");
@@ -124,35 +120,57 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 		return changedUser(viewer);
 	}
 	if (m[1] === "update_pronouns") {
-		const value = oneLine(f.pronouns ?? "").trim();
-		const problem = pronounsProblem(value);
+		const problem = await updatePronouns(viewer, f.pronouns ?? "");
 		if (problem) return profileError(problem);
-		const hate = hateIn(value);
-		if (hate) {
-			await automodStrike(viewer.id, hate, "profile", value);
-			return profileError("Your pronouns contain a slur or hate speech this instance doesn't allow.");
-		}
-		if (blockedWordIn(value)) {
-			if (!viewer.role) await suspendForName(viewer.id, value);
-			return profileError("Your pronouns contain a word this instance doesn't allow.");
-		}
-		if (hasBlockedPhrase(value)) return profileError("Your pronouns contain a phrase this instance doesn't allow.");
-		await sql`update users set pronouns = ${value || null} where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
 	}
 	if (m[1] === "remove_profile_banner") {
 		await sql`update users set banner_url = null where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
 	}
-	// the image was uploaded first; only the viewer's own photo upload is accepted
-	const mediaId = f.media_id;
-	if (!isId(mediaId)) return profileError("Upload the image first and send its media_id.");
-	const [media] = await sql`select id from media where id = ${mediaId}::bigint and user_id = ${viewer.id}::bigint`;
-	if (!media) return profileError("Unknown upload.");
-	if (m[1] === "update_profile_image") await sql`update users set avatar_url = ${`/media/${mediaId}`} where id = ${viewer.id}::bigint`;
+	const problem = await setProfileImage(viewer, m[1] === "update_profile_image" ? "avatar" : "banner", f.media_id);
+	return problem ? profileError(problem) : changedUser(viewer);
+}
+
+// The text fields of a profile, from the web dialog or the public API (PATCH
+// /me). Keys are the web form's: name, description, location, url. Every
+// field is checked before any is saved; the message is for the person.
+export async function updateProfileText(viewer: Viewer, f: Record<string, string>): Promise<string | null> {
+	const limits: Record<string, [string, number]> = { name: ["name", 50], description: ["bio", 160], location: ["location", 30], url: ["website", 100] };
+	const changes: Record<string, string> = {};
+	for (const [field, [column, max]] of Object.entries(limits)) {
+		if (!(field in f)) continue;
+		const value = field === "description" ? cleanText(f[field], { lines: 6 }) : oneLine(f[field]);
+		if ([...value].length > max) return `${field} is limited to ${max} characters.`;
+		if (field === "name" && !value) return "Name can't be blank.";
+		if (field === "url" && value && !/^https?:\/\/\S+$/.test(value)) return "Website must be an http or https address.";
+		const hate = field === "name" ? hateInName(value) : hateIn(value);
+		if (hate) {
+			await automodStrike(viewer.id, hate, field === "name" ? "name" : "profile", value);
+			return field === "name" ? "That name isn't allowed here." : "Your profile contains a slur or hate speech this instance doesn't allow.";
+		}
+		// a blocked word (names.ts): suspended, staff only refused; the
+		// name ignores spacing, the longer fields are read word by word
+		if (field === "name" ? blockedNameIn(value) : blockedWordIn(value)) {
+			if (!viewer.role) await suspendForName(viewer.id, value);
+			return field === "name" ? "That name isn't allowed here." : "Your profile contains a word this instance doesn't allow.";
+		}
+		if (hasBlockedPhrase(value)) return "Your profile contains a phrase this instance doesn't allow.";
+		changes[column] = value;
+	}
+	if (Object.keys(changes).length) await sql`update users set ${sql(changes)} where id = ${viewer.id}::bigint`;
+	return null;
+}
+
+// the image was uploaded first; only the viewer's own photo upload is accepted
+export async function setProfileImage(viewer: Viewer, which: "avatar" | "banner", mediaId: unknown): Promise<string | null> {
+	if (!isId(mediaId)) return "Upload the image first and send its media_id.";
+	const [media] = await sql`select id from media where id = ${mediaId}::bigint and user_id = ${viewer.id}::bigint and kind = 'photo'`;
+	if (!media) return "Unknown upload.";
+	if (which === "avatar") await sql`update users set avatar_url = ${`/media/${mediaId}`} where id = ${viewer.id}::bigint`;
 	// the client appends a size like /1500x500 to banner addresses
 	else await sql`update users set banner_url = ${`/media/banner/${mediaId}`} where id = ${viewer.id}::bigint`;
-	return changedUser(viewer);
+	return null;
 }
 
 // analytics and ad reporting: accepted and dropped

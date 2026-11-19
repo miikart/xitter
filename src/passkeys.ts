@@ -12,16 +12,16 @@
 import { signInCookies } from "./accounts";
 import { accountPage, esc } from "./account-page";
 import { startSession, type Viewer } from "./auth";
-import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
+import { PASSKEY_ORIGINS, PUBLIC_HOSTNAME } from "./config";
 import { sql } from "./db";
 import { requestIp } from "./login-history";
-import { hit, used } from "./ratelimit";
+import { hit, passwordTry } from "./ratelimit";
 import { settings } from "./settings";
 import { ALGORITHMS, b64url, challengeOf, unb64url, verifyAssertion, verifyRegistration } from "./webauthn";
 
 const MAX_PASSKEYS = 10;
 const TIMEOUT = 5 * 60 * 1000;
-const expected = (challenge: string) => ({ challenge, origin: PUBLIC_ORIGIN, rpId: PUBLIC_HOSTNAME });
+const expected = (challenge: string) => ({ challenge, origin: PASSKEY_ORIGINS, rpId: PUBLIC_HOSTNAME });
 const fail = (error: string, status = 400) => Response.json({ error }, { status, headers: { "cache-control": "no-store" } });
 
 // one challenge per ceremony, used once; for adding a passkey it belongs to the account
@@ -41,7 +41,7 @@ async function spend(challenge: string | undefined, userId: string | null): Prom
 
 // a same-site page's own request; SameSite=Lax cookies already keep other
 // sites out, this is the belt to those braces
-const sameOrigin = (req: Request) => req.headers.get("origin") === PUBLIC_ORIGIN;
+const sameOrigin = (req: Request) => PASSKEY_ORIGINS.includes(req.headers.get("origin") ?? "");
 
 async function body(req: Request): Promise<Record<string, unknown>> {
 	if ((Number(req.headers.get("content-length")) || 0) > 64 * 1024) return {};
@@ -95,7 +95,7 @@ export async function passkeySignInRoute(req: Request, path: string): Promise<Re
 		// the account lock first, as password changes and two-factor sign-ins take it
 		const [u] = await tx`select status, deactivated_at, deactivated_at > now() - interval '30 days' as returning
 			from users where id = ${key.user_id}::bigint for update`;
-		// a password change or reset may have removed it while this was checked
+		// it may have been removed (or the account reset by an admin) while this was checked
 		const [still] = await tx`select sign_count from passkeys where id = ${id} and user_id = ${key.user_id}::bigint`;
 		if (!u || !still) return { error: "This passkey isn't on any account here. It may have been removed.", status: 400 };
 		// A counter that didn't move forward means a copied authenticator
@@ -252,12 +252,11 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 		const b = await body(req);
 		const password = typeof b.password === "string" ? b.password : "";
 		const account = viewer.screen_name.toLowerCase();
-		if (used("password", account)) return fail("Too many tries for this account. Wait 15 minutes.", 429);
+		const refund = passwordTry(account);
+		if (!refund) return fail("Too many tries for this account. Wait 15 minutes.", 429);
 		const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (password.length > 1024 || !(await Bun.password.verify(password, u?.password_hash ?? "").catch(() => false))) {
-			hit("password", account);
-			return fail("That password isn't right.");
-		}
+		if (password.length > 1024 || !(await Bun.password.verify(password, u?.password_hash ?? "").catch(() => false))) return fail("That password isn't right.");
+		refund();
 		const keys = await sql`select id, transports from passkeys where user_id = ${viewer.id}::bigint`;
 		if (keys.length >= MAX_PASSKEYS) return fail(`You can have up to ${MAX_PASSKEYS} passkeys. Remove one first.`);
 		return Response.json(
@@ -328,7 +327,7 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 		title: "Passkeys",
 		body: `<h1>Passkeys</h1>
 <p>A passkey signs you in with your fingerprint, face or screen lock instead of your password and two-factor code. It's kept by your device or password manager and only works on ${esc(PUBLIC_HOSTNAME)}, so it can't be phished.</p>
-<p class="dim">Changing or resetting your password removes all your passkeys, so nobody else who added one keeps a way in.</p>
+<p class="dim">Changing or resetting your password keeps your passkeys. If you see one you didn't add, remove it.</p>
 ${list}
 <h2>Add a passkey</h2>
 <form id="add"><label for="pk-name">Name (optional)</label><input id="pk-name" name="name" maxlength="50" placeholder="${esc(deviceName(req))}" autocomplete="off">

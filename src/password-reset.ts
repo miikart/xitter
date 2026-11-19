@@ -28,7 +28,8 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 	});
 	if (!u) return;
 	const name = settings().instance_name;
-	await sendMail(
+	// not awaited: the answer must take as long whether or not there was an account to mail
+	void sendMail(
 		u.email,
 		`Reset your ${name} password`,
 		`Hi @${u.screen_name},\n\nSomeone asked to reset the password of your ${name} account. Open this link within an hour to choose a new one:\n\n${PUBLIC_ORIGIN}/account/reset?token=${token}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
@@ -82,14 +83,17 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 		await tx`update password_resets set used = true where user_id = ${row.user_id}::bigint and not used`;
 		await tx`delete from sessions where user_id = ${row.user_id}::bigint`;
 		await tx`delete from api_tokens where user_id = ${row.user_id}::bigint`;
+		// an app approved just before would otherwise trade its code for a new token
+		await tx`delete from oauth_codes where user_id = ${row.user_id}::bigint`;
 		await tx`delete from login_challenges where user_id = ${row.user_id}::bigint`;
-		await tx`delete from passkeys where user_id = ${row.user_id}::bigint`;
+		// passkeys stay: they live on the owner's devices, and dropping them on
+		// every forgotten password locked people out of their usual sign-in
 		await tx`delete from passkey_challenges where user_id = ${row.user_id}::bigint`;
 		await tx`update email_confirmations set used = true where user_id = ${row.user_id}::bigint and not used`;
 		return true;
 	});
 	if (!changed) return page(req, `<h1>Link expired</h1><p>This reset link is invalid or has been used. <a href="/">Back to sign in</a>, then ask for a new one.</p>`, 410);
-	return page(req, `<h1>Password changed</h1><p>You can now <a href="/">sign in</a> with it. Every device was signed out and your passkeys were removed.</p>`);
+	return page(req, `<h1>Password changed</h1><p>You can now <a href="/">sign in</a> with it. Every device was signed out. Your passkeys still work; remove any you don't recognise on your <a href="/account/passkeys">passkeys page</a>.</p>`);
 }
 
 // the sign-in dialog's "Forgot password?" leads here

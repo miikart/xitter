@@ -53,7 +53,9 @@ export async function actingViewer(member: Viewer, ownerId: string): Promise<Vie
 // settings or delegation, and its messages (end-to-end keys are the owner's).
 const DELEGATE_DENIED_OPS = /XChat|DirectMessage|DmInbox|SendMessage|ConversationEvent|Preference|_settings_|Settings?Mutation|Password|Email|Phone|TwoFactor|Session|Deactivat|ScreenName|UserAccountLabel|AccountParody|Delegat/;
 const DELEGATE_DENIED_REST = /^\/(1\.1|2)\/(dm|direct_messages)\/|^\/1\.1\/account\/(?!settings\.json$|verify_credentials)|^\/1\.1\/strato\/column\/.*\/clients\//;
-const DELEGATE_PRIVATE_REST = /^\/(i\/)?account\/|^\/1\.1\/notifications\/settings\/|^\/1\.1\/users\/email_phone_info|^\/1\.1\/account\/(personalization|user_twitter_data)|^\/xitter\/(export|moderation)/;
+const DELEGATE_PRIVATE_REST = /^\/(i\/)?account\/|^\/1\.1\/notifications\/settings\/|^\/1\.1\/users\/email_phone_info|^\/1\.1\/account\/(personalization|user_twitter_data)|^\/xitter\/(export|moderation|money)(\/|$)/;
+// reads whose names the refused list would catch
+const DELEGATE_READS = new Set(["UserByScreenName"]);
 const DELEGATE_PRIVATE_READS = /XChat|DirectMessage|DmInbox|Session|Email|Phone|TwoFactor|Password|LoginHistory/;
 // Post analytics are for Admins (as the client's role screen says).
 const ANALYTICS_OPS = /^(accountOverview|activeFollowersTile|useFetchAnalytics|contentPage|postDetailsProvider|overviewData)\w*Query$/;
@@ -64,7 +66,13 @@ const CHAT_HARMLESS = new Set(["viewerQuery", "useDirectCallSetupQuery", "GetExt
 export function delegateMay(role: Role, method: string, path: string, operation: string | undefined): boolean {
 	if (operation && Object.hasOwn(chatHandlers, operation) && !CHAT_HARMLESS.has(operation)) return false;
 	if (operation && role !== "Admin" && ANALYTICS_OPS.test(operation)) return false;
-	if (operation) return method === "GET" ? !DELEGATE_PRIVATE_READS.test(operation) : !DELEGATE_DENIED_OPS.test(operation);
+	// A mutation the pinned build hasn't been scanned for yet can arrive as a
+	// GET (ratelimit.ts isMutation), so a refused name stays refused there too
+	// unless it is plainly a read.
+	if (operation && method === "GET") return !DELEGATE_PRIVATE_READS.test(operation) && (/Query$/.test(operation) || DELEGATE_READS.has(operation) || !DELEGATE_DENIED_OPS.test(operation));
+	if (operation) return !DELEGATE_DENIED_OPS.test(operation);
+	// the account's look is its own to change
+	if (path.startsWith("/xitter/theme")) return method === "GET";
 	if (DELEGATE_PRIVATE_REST.test(path)) return false;
 	if (DELEGATE_DENIED_REST.test(path)) return method === "GET" && !/\/(dm|direct_messages)\//.test(path);
 	// reading settings is fine; changing them isn't
@@ -151,8 +159,10 @@ async function membershipRow(id: unknown): Promise<Row | undefined> {
 
 async function invite(v: Viewer, ownerId: string, memberId: string, role: Role) {
 	if (!ROLES.has(role)) throw new PostError("Pick Admin or Contributor.", 214);
-	mayManage(v, ownerId, [role]);
 	if (!/^\d{1,19}$/.test(memberId) || memberId === ownerId) throw new PostError("You can't add this account.", 214);
+	// inviting someone already there changes their role, so their current one counts too
+	const [existing] = await sql`select role from delegation_members where owner_id = ${ownerId}::bigint and member_id = ${memberId}::bigint`;
+	mayManage(v, ownerId, existing ? [role, existing.role] : [role]);
 	const [m] = await sql`select status, delegation_invites, automated_by,
 		exists (select 1 from follows f where f.follower_id = u.id and f.followee_id = ${ownerId}::bigint) as follows_owner
 		from users u where id = ${memberId}::bigint`;

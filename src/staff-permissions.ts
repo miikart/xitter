@@ -3,8 +3,8 @@
 // with the role that has it by default (a Privacy one also hides some fields
 // from what every staff member reads, see `allows`); an admin turns it on or off for each
 // role below admin. Admins always have every permission. Actions outside the
-// list (roles, settings, security, backups, the client build, these
-// permissions themselves) stay with the role written on them in admin.ts.
+// list (roles, settings, security, backups, the client build, server updates,
+// these permissions themselves) stay with the role written on them in admin.ts.
 
 import { settings } from "./settings";
 
@@ -20,11 +20,13 @@ export const PERMISSIONS: Record<string, Permission> = {
 	standing: { group: "Moderation", label: "Restrict, limit, suspend and reinstate accounts, for a while or until lifted, one at a time or many", role: "moderator", actions: ["setStatus", "setTemporaryStatus", "bulkStatus"] },
 	reports: { group: "Moderation", label: "Close reports", role: "moderator", actions: ["resolveReport"] },
 	appeals: { group: "Moderation", label: "See and answer appeals", role: "moderator", actions: ["appeals", "resolveAppeal"] },
-	messages: { group: "Moderation", label: "Send messages, warnings and strikes, and withdraw strikes", role: "moderator", actions: ["sendStaffMessage", "revokeStrike"] },
+	messages: { group: "Moderation", label: "Send messages, warnings and strikes, and withdraw strikes", role: "moderator", actions: ["sendStaffMessage", "revokeStrike", "bulkStrike"] },
 	delete_posts: { group: "Moderation", label: "Delete posts", role: "moderator", actions: ["deletePost"] },
 	post_visibility: { group: "Moderation", label: "Hide posts and articles, mark them sensitive, label them", role: "moderator", actions: ["setPostVisibility", "setPostNotice", "setArticleVisibility"] },
 	media: { group: "Moderation", label: "Delete uploaded media", role: "moderator", actions: ["deleteMedia"] },
 	decor: { group: "Moderation", label: "Reset profile decor", role: "moderator", actions: ["resetDecor"] },
+	// the profile, posts and media in the app, with a Suspended label by the name
+	suspended_profiles: { group: "Moderation", label: "Open suspended accounts' profiles in the app", role: "admin", actions: [] },
 	automod_scan: { group: "Moderation", label: "Scan old posts and profiles with automod", role: "moderator", actions: ["automodScan"] },
 	archive_imports: { group: "Moderation", label: "Approve and decline imports from X archives", role: "moderator", actions: ["archiveImports", "decideArchiveImport"] },
 	release_identities: { group: "Moderation", label: "Release held handles, emails and addresses", role: "admin", actions: ["releaseIdentity"] },
@@ -49,6 +51,9 @@ export const PERMISSIONS: Record<string, Permission> = {
 	// stack traces show the server's paths and internals
 	errors: { group: "Instance", label: "See and resolve server errors", role: "admin", actions: ["errors", "resolveErrors"] },
 	mail: { group: "Instance", label: "Send test mail and digests", role: "admin", actions: ["sendTestMail", "runMailDigests"] },
+	money: { group: "Instance", label: "Change Equicoins settings, adjust balances and reverse payments, open the shop and manage its listings", role: "admin", actions: ["saveMoney", "adjustMoney", "reverseTransfer", "saveShop", "reviewShopItem", "setShopItem", "setRemoteShopItem", "clearShopAnnouncement"] },
+	// delivering anything beyond a badge (a checkmark, an announcement, a hashflag, ...) stays with admins, see money-admin.ts
+	money_shop: { group: "Instance", label: "Equicoins shop: list items, review imported listings, deliver or refund badge requests", role: "moderator", actions: ["createShopItem", "reviewRemoteShopItem", "reviewShopOrder"] },
 	oauth_apps: { group: "Instance", label: "Block and unblock OAuth apps", role: "moderator", actions: ["blockOAuthApp", "unblockOAuthApp"] },
 
 	ip_addresses: { group: "Privacy", label: "See IP addresses: where accounts sign in, other accounts seen at the same address, identities held after deletion", role: "moderator", actions: ["heldIdentities"] },

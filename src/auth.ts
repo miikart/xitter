@@ -27,6 +27,8 @@ export type User = {
 	// the organisation this account is an affiliate of
 	// Settings > Discoverability: people with this email in their contacts may find the account
 	discoverable_by_email?: boolean;
+	// Settings > Post details (classic-detail.ts)
+	classic_post_details?: boolean;
 	// the translator globe: blue, gold (moderator) or yellow (approver)
 	translator?: "translator" | "moderator" | "approver" | null;
 	// when the badge was given ("Verified since")
@@ -85,7 +87,16 @@ export type Viewer = User & {
 };
 
 export const SECURE = PUBLIC_ORIGIN.startsWith("https:") ? "; Secure" : "";
+// A site on a sibling subdomain can set a cookie for the whole domain, and so
+// plant its own session in a visitor's browser. Browsers refuse a __Host-
+// cookie from anywhere but this exact host, so the session cookies carry the
+// prefix wherever they can (it needs Secure, so not on plain http).
+const HOST_ONLY = SECURE ? "__Host-" : "";
+export const SESSION_COOKIE = `${HOST_ONLY}auth_token`;
+export const MULTI_COOKIE = `${HOST_ONLY}auth_multi`;
 const YEAR = 60 * 60 * 24 * 365;
+// a session unused this long is over, whatever its cookie's Max-Age says
+export const SESSION_IDLE_DAYS = 90;
 const randomHex = (bytes: number) => Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
 
 export async function createUser(screenName: string, name: string, password: string): Promise<string> {
@@ -149,6 +160,10 @@ export async function logout(token: string) {
 			and not exists (select 1 from sessions x where x.user_id = users.id and x.superadmin and x.expires_at > now())`;
 }
 
+export async function expireSessions() {
+	await sql`delete from sessions where last_seen_at < now() - make_interval(days => ${SESSION_IDLE_DAYS})`;
+}
+
 export function parseCookies(req: Request): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const part of (req.headers.get("cookie") ?? "").split(/;\s*/)) {
@@ -162,6 +177,7 @@ import { requestCountry } from "./login-history";
 
 const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, coalesce(u.shown_created_at, u.created_at) as created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
+	u.preferences->>'classic_post_details' = 'true' as classic_post_details,
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
 
@@ -176,11 +192,12 @@ const MAX_TOUCHED = 50_000;
 const touched = new Map<string, number>();
 
 async function loadViewer(req: Request): Promise<Viewer | undefined> {
-	const token = parseCookies(req).auth_token ?? oauth1Token(req);
+	const token = parseCookies(req)[SESSION_COOKIE] ?? oauth1Token(req);
 	if (!token) return undefined;
 	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token, s.superadmin
 		from sessions s join users u on u.id = s.user_id
 		where s.token = ${token} and (u.status <> 'suspended' or u.deactivated_at is null) and (s.expires_at is null or s.expires_at > now())
+			and s.last_seen_at > now() - make_interval(days => ${SESSION_IDLE_DAYS})
 			and (u.instance is null or (s.superadmin and s.expires_at is not null))`;
 	// for the admin panel's session list; written at most once a minute, and a
 	// session this server touched within the minute isn't asked again
@@ -207,7 +224,7 @@ export function getViewer(req: Request): Promise<Viewer | undefined> {
 }
 
 // a request signed with an OAuth 1.0a token, not carried by a cookie: no csrf header to expect
-export const signedByOAuth1 = (req: Request) => !parseCookies(req).auth_token && !!oauth1Token(req);
+export const signedByOAuth1 = (req: Request) => !parseCookies(req)[SESSION_COOKIE] && !!oauth1Token(req);
 
 export function csrfCookie(csrf: string): string {
 	return `ct0=${csrf}; Path=/; Max-Age=${YEAR}; SameSite=Lax${SECURE}`;
@@ -216,7 +233,7 @@ export function csrfCookie(csrf: string): string {
 export function sessionCookies(s: { token: string; csrf: string; userId: string }): string[] {
 	const base = `Path=/; Max-Age=${YEAR}; SameSite=Lax${SECURE}`;
 	return [
-		`auth_token=${s.token}; HttpOnly; ${base}`,
+		`${SESSION_COOKIE}=${s.token}; HttpOnly; ${base}`,
 		// the client reads these two itself
 		csrfCookie(s.csrf),
 		`twid=u%3D${s.userId}; ${base}`,
@@ -224,5 +241,6 @@ export function sessionCookies(s: { token: string; csrf: string; userId: string 
 }
 
 export function clearedCookies(): string[] {
-	return ["auth_token", "ct0", "twid"].map((n) => `${n}=; Path=/; Max-Age=0; SameSite=Lax${SECURE}`);
+	// the unprefixed name too: a session cookie from before the prefix
+	return [...new Set([SESSION_COOKIE, "auth_token", "ct0", "twid"])].map((n) => `${n}=; Path=/; Max-Age=0; SameSite=Lax${SECURE}`);
 }
