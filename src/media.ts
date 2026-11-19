@@ -370,9 +370,12 @@ async function params(req: Request, url: URL): Promise<{ fields: Record<string, 
 	return { fields, file };
 }
 
-function idFields(id: string) {
-	// media_id as a number loses precision in JSON; clients read media_id_string
-	return { media_id: Number(id), media_id_string: id, media_key: `3_${id}` };
+function mediaJson(id: string, fields: Record<string, unknown>, status = 200) {
+	const body = JSON.stringify({ media_id_string: id, media_key: `3_${id}`, ...fields });
+	return new Response(`{"media_id":${BigInt(id)},${body.slice(1)}`, {
+		status,
+		headers: { "content-type": "application/json;charset=utf-8" },
+	});
 }
 
 // A GIF the client was asked to crop (an avatar or banner) arrives whole, with
@@ -435,7 +438,7 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 			await sql`insert into media (id, user_id, kind, mime, size, width, height, state)
 				values (${id}::bigint, ${p.userId}::bigint, 'video', 'video/mp4', ${p.total}, 0, 0, 'processing')`;
 			queueVideo(MEDIA_DIR, id);
-			return Response.json({ ...idFields(id), size: p.total, expires_after_secs: 86400, processing_info: { state: "pending", check_after_secs: 1 } });
+			return mediaJson(id, { size: p.total, expires_after_secs: 86400, processing_info: { state: "pending", check_after_secs: 1 } });
 		}
 		let data: Buffer<ArrayBufferLike> = readFileSync(assembled);
 		if (p.category === THEME_BACKGROUND) {
@@ -444,8 +447,7 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 				rmSync(assembled, { force: true });
 				return uploadError(stored.message);
 			}
-			return Response.json({
-				...idFields(id),
+			return mediaJson(id, {
 				size: stored.size,
 				expires_after_secs: 86400,
 				image: { image_type: stored.mime, w: stored.width, h: stored.height },
@@ -467,8 +469,7 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 		writeFileSync(fileOf(id), data);
 		await sql`insert into media (id, user_id, kind, mime, size, width, height, compressed)
 			values (${id}::bigint, ${p.userId}::bigint, 'photo', ${image.mime}, ${data.length}, ${image.width}, ${image.height}, ${compressed})`;
-		return Response.json({
-			...idFields(id),
+		return mediaJson(id, {
 			size: data.length,
 			expires_after_secs: 86400,
 			image: { image_type: image.mime, w: image.width, h: image.height },
@@ -560,7 +561,7 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 			if (activeUploadCount(viewer.id) >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
 			const newMedia = newId();
 			pending.set(newMedia, { userId: viewer.id, total, category: fields.media_category ?? "", video, chunks: new Map(), received: 0, started: Date.now() });
-			return Response.json({ ...idFields(newMedia), expires_after_secs: 86400 }, { status: 202 });
+			return mediaJson(newMedia, { expires_after_secs: 86400 }, 202);
 		}
 		case "APPEND": {
 			const p = id ? pending.get(id) : undefined;
@@ -595,9 +596,8 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 			return new Response(null, { status: 204 });
 		}
 		case "FINALIZE": {
-			if (id && finalizing.get(id)?.userId === viewer.id) return Response.json({
-				...idFields(id), processing_info: { state: "pending", check_after_secs: 1 },
-			});
+			if (id && finalizing.get(id)?.userId === viewer.id)
+				return mediaJson(id, { processing_info: { state: "pending", check_after_secs: 1 } });
 			const p = id ? pending.get(id) : undefined;
 			if (!p || p.userId !== viewer.id) return uploadError("Unknown upload.", 404);
 			return finalize(id!, p);
@@ -605,22 +605,21 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 		case "STATUS": {
 			if (!isId(id)) return uploadError("Unknown upload.", 404);
 			const uploading = pending.get(id);
-			if (uploading?.userId === viewer.id) return Response.json({
-				...idFields(id), processing_info: { state: "uploading" },
+			if (uploading?.userId === viewer.id) return mediaJson(id, {
+				processing_info: { state: "uploading" },
 				total_bytes: uploading.total, received_bytes: uploading.received,
 				segments: [...uploading.chunks].sort(([a], [b]) => a - b).map(([segment_index, bytes]) => ({ segment_index, bytes })),
 				expires_after_secs: Math.max(0, Math.ceil((uploading.started + MAX_PENDING_MS - Date.now()) / 1000)),
 			});
-			if (finalizing.get(id)?.userId === viewer.id) return Response.json({
-				...idFields(id), processing_info: { state: "pending", check_after_secs: 1 },
-			});
+			if (finalizing.get(id)?.userId === viewer.id)
+				return mediaJson(id, { processing_info: { state: "pending", check_after_secs: 1 } });
 			const [row] = await sql`select state from media where id = ${id}::bigint and user_id = ${viewer.id}::bigint`;
 			if (!row) return uploadError("Unknown upload.", 404);
 			if (row.state === "processing")
-				return Response.json({ ...idFields(id), processing_info: { state: "in_progress", check_after_secs: 1, progress_percent: progress.get(id!) ?? 0 } });
+				return mediaJson(id, { processing_info: { state: "in_progress", check_after_secs: 1, progress_percent: progress.get(id!) ?? 0 } });
 			if (row.state === "failed")
-				return Response.json({ ...idFields(id), processing_info: { state: "failed", error: { code: 1, name: "InvalidMedia", message: videoError(id!) } } });
-			return Response.json({ ...idFields(id), processing_info: { state: "succeeded", progress_percent: 100 } });
+				return mediaJson(id, { processing_info: { state: "failed", error: { code: 1, name: "InvalidMedia", message: videoError(id!) } } });
+			return mediaJson(id, { processing_info: { state: "succeeded", progress_percent: 100 } });
 		}
 	}
 	return uploadError("Unknown command.");
