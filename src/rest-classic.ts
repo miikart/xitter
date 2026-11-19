@@ -67,6 +67,7 @@ async function dmNew(viewer: Viewer, q: URLSearchParams) {
 	if (text.length > 10000) return gone("That message is too long.", 354, 403);
 	const to = await target(viewer, q);
 	if (to.id === viewer.id) return gone("You cannot send messages to yourself.", 150, 403);
+	if (to.instance || to.status !== "active" || to.stats?.blocking || to.stats?.blockedBy) return gone("You cannot message this account.", 150, 403);
 	const [row] = await sql`insert into classic_dms (sender_id, recipient_id, text) values (${viewer.id}::bigint, ${to.id}::bigint, ${text}) returning id::text, sender_id::text, recipient_id::text, text, created_at`;
 	return json(await dmRow(viewer.id, row));
 }
@@ -74,7 +75,7 @@ async function dmNew(viewer: Viewer, q: URLSearchParams) {
 async function dmShowOrDestroy(viewer: Viewer, q: URLSearchParams, destroy: boolean) {
 	const id = q.get("id");
 	if (!isId(id)) return gone("No direct message with that ID found.", 34, 404);
-	const [row] = await sql`select id::text, sender_id::text, recipient_id::text, text, created_at from classic_dms where id = ${id}::bigint and (sender_id = ${viewer.id}::bigint or recipient_id = ${viewer.id}::bigint)`;
+	const [row] = await sql`select id::text, sender_id::text, recipient_id::text, text, created_at from classic_dms where id = ${id}::bigint and ((sender_id = ${viewer.id}::bigint and not sender_deleted) or (recipient_id = ${viewer.id}::bigint and not recipient_deleted))`;
 	if (!row) return gone("No direct message with that ID found.", 34, 404);
 	if (destroy) {
 		if (row.sender_id === viewer.id) await sql`update classic_dms set sender_deleted = true where id = ${id}::bigint`;
