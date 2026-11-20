@@ -171,6 +171,18 @@ export function patchText(text: string, chat = false): string {
 	for ([re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
 	out = patchCountryAudience(out);
 	out = patchCircleComposer(out);
+	if (out.includes("extraInitParams") && out.includes(".rz.ProfileBanner")) {
+		out = out.replace(/(case ([\w$]+)\.rz\.ProfileBanner:return \2\.d3\.ProfileBanner;)(?=default:return null)/g,
+			'$1case $2.rz.Avatar:return "profile_image";');
+	}
+	if (out.includes('"ACTION_UPDATE_USER_AVATAR"')) {
+		out = out.replace(/(function\(\w+,(\w+),\w+\)\{return function\(\w+\)\{return function\(\w+,\w+,\w+\)\{var \w+=\w+\.api;\w+\(\{type:\w+\.REQUEST\}\);var \w+=\w+\.j\(\w+)(?=\);return[\s\S]{0,550}?"ACTION_UPDATE_USER_AVATAR")/g,
+			'$1,$2==="ACTION_UPDATE_USER_AVATAR"?{extraInitParams:"&media_category=profile_image"}:void 0');
+	}
+	if (out.includes("Media has no uploader") && out.includes(".uploader.upload({success:")) {
+		out = out.replace(/(function\(\w+)(\)\{return function\(\w+,\w+\)\{var \w+=\w+\(\w+\(\),\w+\),\w+=Object\(\w+\.bindActionCreators\)\(\w+,\w+\),\w+=\w+\.map\(function\(\w+\)\{[\s\S]{0,1200}?\.uploader\.upload\(\{)(?=success:)/g,
+			'$1,xitterUploadOptions$2extraInitParams:xitterUploadOptions?.extraInitParams,');
+	}
 	if (out.includes("NIGHT_MODE_COOKIE")) {
 		out = out.replace(/(document\.cookie=[\w$.]+\.serialize\([\w$]+\.NIGHT_MODE_COOKIE,([\w$]+),\{maxAge:[\w$]+,path:"\/",domain:"\.twitter\.com"\}\))/g,
 			'$1,window.__xitterSaveLegacyNight&&window.__xitterSaveLegacyNight($2)');
@@ -207,6 +219,9 @@ export const clearPatchCache = () => {
 	cacheBytes = 0;
 };
 
+const sizedAvatar = (url: string, size: "200x200" | "400x400") =>
+	String.raw`${url}?.replace(/(\/profile_images\/\d+\/avatar|\/default_profile_images\/default_profile)_normal(?=\.)/,"$1_${size}")`;
+
 // the name can change while the server runs, so script files are cached per name
 export function patchFile(key: string, raw: Buffer, original = false): Buffer {
 	const js = key.endsWith(".js");
@@ -215,6 +230,14 @@ export function patchFile(key: string, raw: Buffer, original = false): Buffer {
 	let hit = cachedPatch(key, original);
 	if (!hit) {
 		let text = patchText(raw.toString("utf8"), key.startsWith("/x-web/xchat/"));
+		if (/\/bundle\.UserAvatar\.[^/]+\.js$/.test(key)) {
+			text = text.replace(/((?:mediaUrl|uri):(?:[\w$]+&&)?)([\w$]+\.profile_image_url_https)(?=[,}])/g,
+				(_, prop, url) => prop + sizedAvatar(url, "400x400"));
+		}
+		if (/\/web\/(?:ltr\/)?bundle\.UserProfile\.[^/]+\.js$/.test(key)) {
+			text = text.replace(/(_renderAvatar=function\(\)\{[^{}]{0,350}\?void 0:)([\w$]+\.profile_image_url_https)(?=;return)/g,
+				(_, prefix, url) => prefix + sizedAvatar(url, "200x200"));
+		}
 		if (js && !original) text = brandText(text, name, !I18N.test(key));
 		hit = Buffer.from(text);
 		if (hit.byteLength <= MAX_PATCH_CACHE_BYTES) {

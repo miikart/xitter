@@ -629,7 +629,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	// the frame X's client opens for a player card (YouTube links)
 	if (isPlayerPage(p)) return viewer ? playerPage(p, viewer.id) : new Response("not found", { status: 404 });
 	// uploads stay inside the instance: only signed-in users get them
-	if (p.startsWith("/media/")) {
+	if (p.startsWith("/media/") || p.startsWith("/profile_images/")) {
 		if (viewer) return serveMedia(req, p, viewer);
 		const holder = mediaTokenUser((url.searchParams.get("mt") ?? "").split("/")[0]);
 		const as = holder && (await viewerById(holder));

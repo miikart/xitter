@@ -25,6 +25,9 @@ const stat = (name: string) => sql`coalesce((select s.${sql(name)} from user_sta
 export const userCols = (viewerId: string) => sql`
 	u.id as a_id, u.screen_name as a_screen_name, u.name as a_name, u.bio as a_bio, u.location as a_location,
 	u.website as a_website, u.avatar_url as a_avatar_url, u.banner_url as a_banner_url, u.pinned_post_id as a_pinned_post_id, u.protected as a_protected, u.verified_type as a_verified_type, u.verified_at as a_verified_at, u.translator as a_translator, u.flag as a_flag, u.pronouns as a_pronouns, u.status as a_status, u.instance as a_instance, coalesce(u.shown_created_at, u.created_at) as a_created_at,
+	(select '/profile_images/' || m.id || '/avatar_normal.' || case m.mime when 'image/jpeg' then 'jpg' else split_part(m.mime, '/', 2) end
+		from media m where m.id = substring(u.avatar_url from '^/media/([0-9]{1,19})$')::bigint and m.user_id = u.id and u.avatar_url = '/media/' || m.id
+		and m.remote_instance is null and m.mime in ('image/jpeg', 'image/png', 'image/webp', 'image/gif')) as a_profile_image_url,
 	${badgesOf(sql`u.id`)} as a_badges, u.remote_badges as a_remote_badges,
 	greatest((u.remote_counts->>'posts')::int, ${stat("posts")}) as a_posts,
 	(select json_build_object('id', o.id::text, 'name', o.name, 'screen_name', o.screen_name, 'avatar_url', case when o.org_badge_id is not null then '/public/badge-' || o.org_badge_id::text || '.png' else coalesce(o.remote_org_badge, o.avatar_url) end, 'since', af.created_at)
@@ -58,6 +61,7 @@ export function toUser(r: any): User {
 		location: r.a_location,
 		website: r.a_website,
 		avatar_url: r.a_avatar_url,
+		profile_image_url: r.a_profile_image_url,
 		banner_url: r.a_banner_url,
 		pinned_post_id: r.a_pinned_post_id,
 		protected: !!r.a_protected,

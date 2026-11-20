@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { sql } from "./db";
 import { recordError } from "./errors";
 import { newId } from "./ids";
-import { type Image, MEDIA_DIR, sniffImage } from "./media";
+import { AVATAR_SIDE, type Image, MEDIA_DIR, sniffImage } from "./media";
 import { settings } from "./settings";
 import { FFMPEG, recompressVideo, spawnLimited } from "./video";
 
@@ -105,13 +105,17 @@ export function shrinkPhoto(data: Buffer, image: Image) {
 	return encodePhoto(data, image, `scale='min(iw,${side})':'min(ih,${side})':force_original_aspect_ratio=decrease`, quality);
 }
 
-async function encodePhoto(data: Buffer, image: Image, resize: string, quality: number, profile = false): Promise<{ data: Buffer; image: Image } | undefined> {
+async function encodePhoto(data: Buffer, image: Image, resize: string, quality: number, profile?: "avatar" | "variant" | "typed-variant"): Promise<{ data: Buffer; image: Image } | undefined> {
 	const format = PHOTO_FORMATS.get(image.mime);
 	if (!format) return undefined;
 	const shape = shapeOf(data, image.mime);
-	if (shape.animated || image.width < 1 || image.height < 1 || image.width * image.height > MAX_PIXELS) return { data, image };
+	if (shape.animated) return { data, image };
+	if (image.width < 1 || image.height < 1 || image.width * image.height > MAX_PIXELS) return profile === "avatar" ? undefined : { data, image };
 	const filters = [ORIENT[exifOrientation(data)], resize].filter(Boolean).join(",");
-	const codec = shape.alpha ? ["-c:v", "png", "-pred", "mixed"] : ["-c:v", "mjpeg", "-q:v", String(qscale(quality)), "-pix_fmt", "yuvj420p"];
+	const typed = profile === "typed-variant";
+	let codec = ["-c:v", "mjpeg", "-q:v", String(qscale(quality)), "-pix_fmt", profile === "avatar" ? "yuvj444p" : "yuvj420p"];
+	if (typed && image.mime === "image/webp") codec = ["-c:v", "libwebp", "-quality", String(quality)];
+	else if (shape.alpha || (typed && image.mime === "image/png")) codec = ["-c:v", "png", "-pred", "mixed"];
 	return inTurn(async () => {
 		const p = spawnLimited(
 			[FFMPEG, "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-threads", "1", "-noautorotate", "-protocol_whitelist", "pipe", "-f", format, "-i", "pipe:0",
@@ -132,11 +136,20 @@ async function encodePhoto(data: Buffer, image: Image, resize: string, quality: 
 			return undefined;
 		}
 		const resized = made.width !== image.width || made.height !== image.height;
-		return out.length < data.length || (profile && resized) ? { data: out, image: made } : { data, image };
+		return profile === "avatar" || out.length < data.length || (profile && resized) ? { data: out, image: made } : { data, image };
 	}).catch((e) => {
 		failure = e instanceof Error ? e.message : String(e);
 		return undefined;
 	});
+}
+
+function profileResize(width: number, height: number) {
+	const crop = `crop='min(iw,ih*${width}/${height})':'min(ih,iw*${height}/${width})':exact=1`;
+	return `${crop},scale='min(iw,${width})':'min(ih,${height})':flags=lanczos,setsar=1`;
+}
+
+export function encodeAvatar(data: Buffer, image: Image) {
+	return encodePhoto(data, image, profileResize(AVATAR_SIDE, AVATAR_SIDE), 85, "avatar");
 }
 
 type ProfileVariant = { body: Blob; mime: string; etag: string };
@@ -144,10 +157,10 @@ const profileVariants = new Map<string, ProfileVariant | undefined>();
 const profileJobs = new Map<string, Promise<ProfileVariant | undefined>>();
 let profileBytes = 0;
 
-export async function profileVariant(id: string, source: Blob, mime: string, width: number, height: number): Promise<ProfileVariant | undefined> {
+export async function profileVariant(id: string, source: Blob, mime: string, width: number, height: number, keepFormat = false): Promise<ProfileVariant | undefined> {
 	const modified = (source as Blob & { lastModified?: number }).lastModified;
 	if (!modified || !PHOTO_FORMATS.has(mime) || source.size > 32 * 1024 * 1024) return;
-	const key = `${id}-${modified}-${source.size}-${width}x${height}`;
+	const key = `${id}-${modified}-${source.size}-${width}x${height}${keepFormat ? `-${mime}` : ""}`;
 	if (profileVariants.has(key)) {
 		const hit = profileVariants.get(key);
 		profileVariants.delete(key);
@@ -161,9 +174,10 @@ export async function profileVariant(id: string, source: Blob, mime: string, wid
 		const bytes = Buffer.from(await source.arrayBuffer());
 		const image = sniffImage(bytes);
 		if (!image || image.mime !== mime) return;
-		const crop = `crop='min(iw,ih*${width}/${height})':'min(ih,iw*${height}/${width})':exact=1`;
-		const scale = `scale='min(iw,${width})':'min(ih,${height})':flags=lanczos,setsar=1`;
-		const encoded = await encodePhoto(bytes, image, `${crop},${scale}`, 80, true);
+		const fits = width === height && image.width === image.height && image.width <= width;
+		const encoded = fits && exifOrientation(bytes) === 1
+			? { data: bytes, image }
+			: await encodePhoto(bytes, image, profileResize(width, height), 80, keepFormat ? "typed-variant" : "variant");
 		if (!encoded) return;
 		const variant = encoded.data === bytes ? undefined : {
 			body: new Blob([new Uint8Array(encoded.data)]),

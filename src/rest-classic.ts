@@ -86,7 +86,7 @@ async function dmShowOrDestroy(viewer: Viewer, q: URLSearchParams, destroy: bool
 
 // --- photo tweets ----------------------------------------------------------------
 
-export async function uploadPhoto(viewer: Viewer, file: File): Promise<string> {
+export async function uploadPhoto(viewer: Viewer, file: File, category: "tweet_image" | "profile_image" = "tweet_image"): Promise<string> {
 	const call = async (query: Record<string, string>, form?: FormData) => {
 		const url = new URL(`${PUBLIC_ORIGIN}/i/media/upload.json?${new URLSearchParams(query)}`);
 		const res = await mediaUpload(new Request(url, { method: "POST", body: form }), url, viewer);
@@ -94,7 +94,7 @@ export async function uploadPhoto(viewer: Viewer, file: File): Promise<string> {
 		if (res.status >= 400) throw new PostError((out as Obj)?.errors?.[0]?.message ?? "That photo could not be uploaded.", 324);
 		return out as Obj;
 	};
-	const init = await call({ command: "INIT", total_bytes: String(file.size), media_type: file.type || "image/jpeg", media_category: "tweet_image" });
+	const init = await call({ command: "INIT", total_bytes: String(file.size), media_type: file.type || "image/jpeg", media_category: category });
 	const id = String(init.media_id_string);
 	const part = new FormData();
 	part.set("media", file, "media");

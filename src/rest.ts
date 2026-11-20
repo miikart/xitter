@@ -103,7 +103,7 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 	const f = await form(req);
 	if (file && typeof file !== "string" && file.size) {
 		try {
-			f.media_id = await uploadPhoto(viewer, file);
+			f.media_id = await uploadPhoto(viewer, file, m[1] === "update_profile_image" ? "profile_image" : "tweet_image");
 		} catch (e) {
 			return profileError(e instanceof Error ? e.message : "That picture could not be uploaded.");
 		}

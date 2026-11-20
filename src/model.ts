@@ -279,7 +279,7 @@ export function userResult(u: User) {
 		action_counts: { favorites_count: u.stats?.likes ?? 0 },
 		affiliates_highlighted_label: badgeLabel(u),
 		...(isOrganization(u) ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
-		avatar: { image_url: absolute(u.avatar_url) ?? DEFAULT_AVATAR },
+		avatar: { image_url: avatarUrl(u.profile_image_url ?? u.avatar_url) },
 		...bioLanguage(u),
 		...(u.banner_url ? { banner: { image_url: absolute(u.banner_url) } } : {}),
 		core: { created_at: apiDate(u.created_at), name: u.name, screen_name: u.screen_name },
@@ -357,7 +357,7 @@ export function legacyUser(u: User) {
 		verified_user_profiles: { super_follows_user_profile: { is_active: false } },
 		verified: usesLegacyVerification() && isVerified(u),
 		protected: !!u.protected,
-		profile_image_url_https: eggAvatar(absolute(u.avatar_url), u.id),
+		profile_image_url_https: eggAvatar(absolute(u.profile_image_url ?? u.avatar_url), u.id),
 		...(u.banner_url ? { profile_banner_url: absolute(u.banner_url) } : {}),
 		can_media_tag: true,
 		// with a default avatar and no bio or banner the client offers its "Set up

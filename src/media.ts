@@ -20,10 +20,11 @@ import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { settings } from "./settings";
 import { gifProxy } from "./gifs";
-import { compressUpload, profileVariant } from "./media-compress";
+import { compressUpload, encodeAvatar, profileVariant } from "./media-compress";
 import { cropGif, maxVideoBytes, posterFile, progress, queueVideo, sourceFile, videoError, videoSupported } from "./video";
 
 export const MEDIA_DIR = process.env.MEDIA_DIR ?? "media";
+export const AVATAR_SIDE = 400;
 const maxImage = () => settings().limits.image_mb * 1024 * 1024;
 const MAX_GIF = 15 * 1024 * 1024;
 const MAX_PENDING_MS = 60 * 60 * 1000;
@@ -36,6 +37,7 @@ const finalizing = new Map<string, Pending>();
 const sourceUploads = new Map<string, string>();
 const pendingDir = (id: string) => join(MEDIA_DIR, ".pending", id);
 const segmentFile = (id: string, index: number) => join(pendingDir(id), String(index));
+const avatarCategory = (category: string | undefined) => category === "profile_image" || category === "avatar_image";
 
 function discardPending(id: string) {
 	pending.delete(id);
@@ -410,7 +412,8 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 		if (p.received !== p.total) return uploadError("File size does not match the size announced at INIT.");
 		const parts = [...p.chunks.keys()].sort((a, b) => a - b);
 		mkdirSync(MEDIA_DIR, { recursive: true });
-		const assembled = p.video ? sourceFile(MEDIA_DIR, id) : fileOf(id);
+		const avatar = avatarCategory(p.category);
+		const assembled = p.video ? sourceFile(MEDIA_DIR, id) : avatar ? join(pendingDir(id), "avatar") : fileOf(id);
 		const output = await open(assembled, "w");
 		try {
 			const buffer = Buffer.allocUnsafe(64 * 1024);
@@ -464,8 +467,14 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 			return uploadError("File is too large.");
 		}
 		if (image.mime === "image/gif") ({ data, image } = await croppedGif(id, data, image));
-		let compressed: boolean;
-		({ data, image, compressed } = await compressUpload(data, image));
+		let compressed = avatar;
+		if (avatar && image.mime !== "image/gif") {
+			const encoded = await encodeAvatar(data, image);
+			if (!encoded) return uploadError("That profile picture could not be processed.");
+			({ data, image } = encoded);
+		} else if (!avatar) {
+			({ data, image, compressed } = await compressUpload(data, image));
+		}
 		writeFileSync(fileOf(id), data);
 		await sql`insert into media (id, user_id, kind, mime, size, width, height, compressed)
 			values (${id}::bigint, ${p.userId}::bigint, 'photo', ${image.mime}, ${data.length}, ${image.width}, ${image.height}, ${compressed})`;
@@ -554,6 +563,7 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 			const total = Number(fields.total_bytes);
 			const video = /^video\//.test(fields.media_type ?? "") || /video/.test(fields.media_category ?? "");
 			if (themeBg && video) return uploadError("Theme backgrounds are images.");
+			if (avatarCategory(fields.media_category) && video) return uploadError("Profile pictures are images.");
 			if (video && !(await videoSupported())) return uploadError("Video uploads are not available on this server.");
 			if (!video && fields.media_type && !/^image\//.test(fields.media_type)) return uploadError("Only images and videos can be uploaded.");
 			const cap = themeBg ? THEME_PHOTO_MAX : video ? maxVideoBytes() : MAX_GIF;
@@ -701,7 +711,8 @@ function tagOf(served: Served, body: Blob, cache: string): { etag?: string } {
 }
 const unchanged = (req: Request, headers: Record<string, string>) => !!headers.etag && req.headers.get("if-none-match") === headers.etag;
 
-const AVATAR_SIDES = new Map([["mini", 24], ["normal", 48], ["bigger", 73], ["200x200", 200], ["400x400", 400]]);
+const AVATAR_SIDES = new Map([["mini", 24], ["normal", 48], ["bigger", 73], ["x96", 96], ["reasonably_small", 128], ["200x200", 200], ["400x400", AVATAR_SIDE]]);
+const PROFILE_IMAGE_PATH = /^\/profile_images\/(\d{1,19})\/(?:[\w.%~-]{1,180}?_(mini|normal|bigger|x96|reasonably_small|200x200|400x400)|avatar)\.(jpe?g|png|gif|webp)$/i;
 const BANNER_WIDTHS = new Map([["300x100", 300], ["600x200", 600], ["1080x360", 1080], ["1500x500", 1500]]);
 
 function profileSize(served: Served, bannerPath: boolean, extension: string | undefined, size: string | null): [number, number] | undefined {
@@ -710,7 +721,7 @@ function profileSize(served: Served, bannerPath: boolean, extension: string | un
 		if (width) return [width, width / 3];
 	}
 	if (!bannerPath && !extension && served.avatar) {
-		const side = size ? AVATAR_SIDES.get(size) : 400;
+		const side = size ? AVATAR_SIDES.get(size) : AVATAR_SIDE;
 		if (side) return [side, side];
 	}
 }
@@ -728,14 +739,21 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 		if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 		return new Response(body, { headers });
 	}
-	const m = /^\/media\/(banner\/)?(\d{1,19})(?:\.([a-z0-9]+))?(?:\/([\w-]+))?$/.exec(pathname);
-	const source = m && isId(m[2]) && (await remoteMediaFile(m[2]));
-	if (!m || !source) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const served = await servedOf(m[2]);
-	const cache = served && (await cacheFor(viewer, served));
-	if (!served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const dimensions = profileSize(served, !!m[1], m[3], m[4] ?? new URL(req.url).searchParams.get("name"));
-	const variant = dimensions && await profileVariant(served.id, source, served.mime, ...dimensions);
+	const avatar = PROFILE_IMAGE_PATH.exec(pathname);
+	const m = avatar ? null : /^\/media\/(banner\/)?(\d{1,19})(?:\.([a-z0-9]+))?(?:\/([\w-]+))?$/.exec(pathname);
+	const id = avatar?.[1] ?? m?.[2];
+	if (!isId(id)) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	const served = await servedOf(id);
+	const extension = avatar?.[3]?.toLowerCase();
+	if (!served || (avatar && (!served.avatar || EXT[served.mime] !== (extension === "jpeg" ? "jpg" : extension)))) {
+		return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	}
+	const cache = await cacheFor(viewer, served);
+	const source = cache && await remoteMediaFile(id);
+	if (!cache || !source) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	const variantName = avatar ? avatar[2]?.toLowerCase() ?? null : m?.[4] ?? new URL(req.url).searchParams.get("name");
+	const dimensions = profileSize(served, !!m?.[1], m?.[3], variantName);
+	const variant = dimensions && await profileVariant(served.id, source, served.mime, ...dimensions, !!avatar);
 	const body = variant?.body ?? source;
 	const tag = variant ? (cache === REVALIDATE ? { etag: variant.etag } : {}) : tagOf(served, body, cache);
 	const headers: Record<string, string> = { "content-type": servedType(variant?.mime ?? served.mime), "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, "accept-ranges": "bytes", ...tag };

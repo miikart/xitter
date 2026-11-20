@@ -84,15 +84,26 @@ const ffprobe = process.env.FFPROBE ?? "ffprobe";
 const dir = mkdtempSync(join(tmpdir(), "xitter-gif-"));
 const wide = join(dir, "wide.jpg");
 if (Bun.spawnSync([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1800x900", "-frames:v", "1", "-q:v", "2", "-threads", "1", wide]).exitCode === 0) {
-	const id = await upload(wide, "profile_image", 1);
+	const avatarId = await upload(wide, "profile_image", 1);
+	const storedAvatar = await fetch(`${origin}/media/${avatarId}?name=orig`, { headers });
+	const storedBytes = Buffer.from(await storedAvatar.arrayBuffer());
+	const storedSize = Bun.spawnSync([ffprobe, "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "pipe:0"], { stdin: storedBytes });
+	check("an avatar upload stores a 400x400 image", storedAvatar.ok && storedSize.stdout.toString().trim() === "400x400", storedSize.stdout.toString().trim());
+	const id = await upload(wide, "tweet_image", 1);
 	const apply = (kind: string) => fetch(`${origin}/i/api/1.1/account/update_profile_${kind}.json`, {
 		method: "POST", headers, body: new URLSearchParams({ media_id: id }),
 	});
 	const a = await (await apply("image")).json();
 	const b = await (await apply("banner")).json();
+	const avatarUrl = String(a.profile_image_url_https);
+	check("profile reports the normal avatar path", new URL(avatarUrl).pathname === `/profile_images/${id}/avatar_normal.jpg`, avatarUrl);
 	const source = await fetch(`${origin}/media/${id}?name=orig`, { headers });
 	const original = await source.arrayBuffer();
-	for (const [url, expected] of [[a.profile_image_url_https, "400x400"], [b.profile_banner_url, "1500x500"], [`${b.profile_banner_url}/300x100`, "300x100"]]) {
+	const variants = [["mini", 24], ["normal", 48], ["bigger", 73], ["reasonably_small", 128], ["200x200", 200], ["400x400", 400]] as const;
+	for (const [url, expected] of [
+		...variants.map(([name, side]) => [avatarUrl.replace("_normal", `_${name}`), `${side}x${side}`]),
+		[b.profile_banner_url, "1500x500"], [`${b.profile_banner_url}/300x100`, "300x100"],
+	]) {
 		const res = await fetch(url, { headers });
 		const bytes = Buffer.from(await res.arrayBuffer());
 		const probe = Bun.spawnSync([ffprobe, "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "pipe:0"], { stdin: bytes });

@@ -12,6 +12,7 @@ export type User = {
 	location: string;
 	website?: string;
 	avatar_url: string | null;
+	profile_image_url?: string | null;
 	banner_url: string | null;
 	pinned_post_id?: string | null;
 	verified_type: "blue" | "business" | "government" | "government_individual" | null;
