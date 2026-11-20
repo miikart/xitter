@@ -16,6 +16,10 @@
 	nav { border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; -ms-overflow-style: none; }
 	nav::-webkit-scrollbar { display: none; }
 	nav .logo { width: 128px; margin: 4px 8px 20px; display: block; }
+	.nav-search { position: relative; margin: 0 4px 8px; }
+	.nav-search .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--dim); pointer-events: none; }
+	.nav-search input { width: 100%; padding-left: 36px; border-radius: 999px; background: var(--panel); }
+	.nav-search-empty { margin: 8px 12px; }
 	nav button, nav a[data-page] { display: flex; align-items: center; gap: 12px; width: 100%; padding: 7px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 15px; text-align: left; text-decoration: none; cursor: pointer; }
 	nav button:hover, nav a[data-page]:hover { background: var(--panel); }
 	nav button.on, nav a[data-page].on { font-weight: 700; }
@@ -27,6 +31,8 @@
 	nav .group.open .ghead .icon { rotate: 180deg; }
 	nav .gitems { display: none; }
 	nav .group.open .gitems, nav .group.solo .gitems { display: block; }
+	nav.searching .ghead { display: none; }
+	nav.searching .group .gitems { display: block; }
 	nav .end { margin-top: 12px; }
 	nav .who { margin-top: 24px; padding: 0 12px; color: var(--dim); font-size: 13px; }
 	main { padding: 20px 24px 64px; width: 100%; max-width: 1440px; min-width: 0; margin: 0 auto; }
@@ -292,6 +298,7 @@
 		.app { grid-template-columns: 1fr; }
 		nav { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 2px; }
 		nav .logo { display: none; }
+		.nav-search, .nav-search-empty { flex-basis: 100%; }
 		nav button { width: auto; padding: 8px 10px; font-size: 14px; }
 		nav .who { display: none; }
 		/* the groups make one row of chips, the open one's pages a row below */
@@ -349,6 +356,11 @@
 <div class="app">
 	<nav id="nav">
 		<a href="/home" title="Back to {{instance}}"><img class="logo" src="/public/logo-dark.png" alt="{{instance}}"></a>
+		<form class="nav-search" role="search" aria-label="Admin navigation" hidden>
+			<span class="icon" aria-hidden="true">search</span>
+			<input id="nav-search" type="search" placeholder="Search admin" aria-label="Search admin pages" autocomplete="off">
+		</form>
+		<p class="nav-search-empty dim small" role="status" hidden>No matching admin pages.</p>
 	</nav>
 	<div class="main-col"><div id="update-bar" role="status" hidden></div><main id="main"></main></div>
 </div>
@@ -447,7 +459,7 @@ const PAGES = {
 	badges: { icon: "verified", title: "Badges" },
 	stickers: { icon: "add_reaction", title: "Stickers" },
 	hashflags: { icon: "favorite", title: "Branded hashtags" },
-	switches: { icon: "toggle_on", title: "Feature switches", needs: "admin" },
+	switches: { icon: "toggle_on", title: "Feature switches", needs: "admin", keywords: "android mobile experiments self retweet quote flags" },
 	topics: { icon: "tag", title: "Topics" },
 	cards: { icon: "newspaper", title: "Explore cards" },
 	email: { icon: "mail", title: "Email" },
@@ -495,13 +507,57 @@ function openAdminRoute(hash) {
 }
 window.addEventListener("keydown", (e) => {
 	if (e.key === "/" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.target.closest("input, textarea, select, [contenteditable=true]")) {
-		const search = document.querySelector('#main input[type="search"], #main input#q, #main input#author');
+		const search = document.querySelector('#main input[type="search"], #main input#q, #main input#author') || $("#nav-search");
 		if (search) { e.preventDefault(); search.focus(); search.select?.(); }
 	} else if (e.key === "Escape" && e.target.matches('#main input[type="search"], #main input#q, #main input#author')) {
 		e.target.value = "";
 		e.target.dispatchEvent(new Event("input", { bubbles: true }));
 	}
 });
+function adminSearchMatches(page, query) {
+	const terms = query.trim().toLowerCase().split(/\s+/);
+	const words = (page.title + " " + (page.keywords || "")).toLowerCase();
+	return terms.every((term) => words.includes(term));
+}
+
+function initNavSearch(nav) {
+	const form = nav.querySelector(".nav-search");
+	const input = nav.querySelector("#nav-search");
+	const groups = [...nav.querySelectorAll(".group")].map((group) => ({ group, links: [...group.querySelectorAll("[data-page]")] }));
+	const empty = nav.querySelector(".nav-search-empty");
+	let firstMatch;
+	const update = () => {
+		const query = input.value.trim();
+		nav.classList.toggle("searching", !!query);
+		firstMatch = undefined;
+		for (const { group, links } of groups) {
+			for (const link of links) {
+				link.hidden = !adminSearchMatches(PAGES[link.dataset.page], query);
+				if (!link.hidden) firstMatch ??= link;
+			}
+			group.hidden = links.every((link) => link.hidden);
+		}
+		empty.hidden = !query || !!firstMatch;
+	};
+	const clear = () => {
+		input.value = "";
+		update();
+	};
+	form.hidden = false;
+	input.addEventListener("input", update);
+	input.addEventListener("keydown", (e) => {
+		if (e.key === "Escape" && input.value) {
+			e.preventDefault();
+			clear();
+		}
+	});
+	form.addEventListener("submit", (e) => {
+		e.preventDefault();
+		if (input.value.trim()) firstMatch?.click();
+	});
+	return clear;
+}
+
 function tableSearch(main, inputId, rowSelector, countId, emptyId, label) {
 	const input = main.querySelector("#" + inputId);
 	if (!input) return;
@@ -2511,9 +2567,14 @@ async function renderUser(main, id) {
 		(me.superadmin_home ? '<button onclick="location.href=\'/federation/superadmin\'"><span class="icon">shield_person</span>Superadmin</button>' : "") +
 		'<button onclick="location.href=\'/home\'"><span class="icon">arrow_back</span>Back to {{instance}}</button>' +
 		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div></div>");
+	const clearNavSearch = initNavSearch($("#nav"));
 	document.querySelectorAll("nav [data-page]").forEach((b) => {
 		b.onclick = (e) => {
-			if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) { e.preventDefault(); go(b.dataset.page); }
+			if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+				e.preventDefault();
+				clearNavSearch();
+				go(b.dataset.page);
+			}
 		};
 	});
 	document.querySelectorAll("nav .ghead").forEach((h) => h.onclick = () => {
