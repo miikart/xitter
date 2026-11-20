@@ -7,6 +7,12 @@ Postgres, so the real x.com interface runs against your own instance.
 The client itself is not in this repository. Each instance downloads its own
 copy during setup, and it stays on that machine.
 
+## Miikart public test
+
+[miikart.co](https://miikart.co) runs the
+[`integration/upstream-before-2020` branch](https://github.com/miikart/xitter/tree/integration/upstream-before-2020)
+with a [July 15, 2019 Twitter web capture](https://web.archive.org/web/20190715204716id_/https://mobile.twitter.com/home).
+
 ## What works
 
 - Posting, replies, quotes, reposts, likes, bookmarks (with folders), pinned
@@ -334,6 +340,12 @@ archived clients whose own sign-in dialog doesn't work (the 2022 client sends
 people to `/i/flow/login`, which has no page of its own). Inside Docker the
 `client` volume shadows the repository's `client/`, so copy a build in:
 `docker compose cp client/builds/2022-11 app:/app/client/builds/2022-11`.
+
+Admin > Client searches a local Wayback CDX catalog in
+`src/client-archive-catalog.json`. It contains monthly HTTP 200 captures of
+selected URLs from the index, plus pages whose format has been checked.
+It contacts Wayback when you import a capture and checks that it is a usable
+responsive web app build.
 
 ### Keep these private
 

@@ -82,6 +82,27 @@ check("avatar set", String(a.profile_image_url_https).includes(avatar), a.profil
 const ffmpeg = process.env.FFMPEG ?? "ffmpeg";
 const ffprobe = process.env.FFPROBE ?? "ffprobe";
 const dir = mkdtempSync(join(tmpdir(), "xitter-gif-"));
+const wide = join(dir, "wide.jpg");
+if (Bun.spawnSync([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1800x900", "-frames:v", "1", "-q:v", "2", "-threads", "1", wide]).exitCode === 0) {
+	const id = await upload(wide, "profile_image", 1);
+	const apply = (kind: string) => fetch(`${origin}/i/api/1.1/account/update_profile_${kind}.json`, {
+		method: "POST", headers, body: new URLSearchParams({ media_id: id }),
+	});
+	const a = await (await apply("image")).json();
+	const b = await (await apply("banner")).json();
+	const source = await fetch(`${origin}/media/${id}?name=orig`, { headers });
+	const original = await source.arrayBuffer();
+	for (const [url, expected] of [[a.profile_image_url_https, "400x400"], [b.profile_banner_url, "1500x500"], [`${b.profile_banner_url}/300x100`, "300x100"]]) {
+		const res = await fetch(url, { headers });
+		const bytes = Buffer.from(await res.arrayBuffer());
+		const probe = Bun.spawnSync([ffprobe, "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "pipe:0"], { stdin: bytes });
+		check(`profile image serves ${expected}`, res.ok && probe.stdout.toString().trim() === expected, probe.stdout.toString().trim());
+		check(`profile image ${expected} is smaller than the original`, bytes.length < original.byteLength);
+		const etag = res.headers.get("etag");
+		const cached = etag && await fetch(url, { headers: { ...headers, "if-none-match": etag } });
+		check(`profile image ${expected} revalidates`, !!cached && cached.status === 304);
+	}
+}
 const gifPath = join(dir, "anim.gif");
 if (Bun.spawnSync([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=60x40:rate=5", "-t", "1", gifPath]).exitCode !== 0) {
 	console.log("skip animated GIF avatar checks: no ffmpeg");

@@ -1,20 +1,16 @@
-// Admin > Client > Archive: find the web client as the Internet Archive kept it
-// (pages from 2018 on) and add a capture to client/builds/ like any other pin.
-//
-// Only some captures are the web app. Early ones, and most of mobile.twitter.com
-// before the app replaced it, are server-rendered pages with nothing to run, so
-// every capture is checked when it is imported. The archive throttles clients
-// that ask quickly: requests here go one at a time and wait on a 429.
-
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Build } from "./build";
 import { BUILDS_DIR, listBuilds } from "./client-update";
-import { getClientFile } from "./client-cache";
+import { getClientFile, readUpTo } from "./client-cache";
 import { snapshotPage } from "./client-snapshot";
+import catalogData from "./client-archive-catalog.json";
 
 const ARCHIVE = "https://web.archive.org";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+export const ARCHIVE_FIRST_YEAR = Number(catalogData[0].timestamp.slice(0, 4));
+const CATALOG = catalogData as { timestamp: string; page: string; kind: "responsive" | "indexed" }[];
+const LITE_PAGES = ["mobile.twitter.com/", "mobile.twitter.com/home"];
 // pages that boot the web app (the archive has them from different years;
 // each capture is checked on import, so a page that was the old site is refused)
 const PAGES = [
@@ -26,7 +22,7 @@ const PAGES = [
 const ID_NAME = /^[A-Za-z0-9._-]{1,80}$/;
 const STAMP = /^\d{14}$/;
 
-export type Capture = { timestamp: string; page: string; date: string };
+type ArchiveImport = { id: string; sha: string; date: string; existing: boolean };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let queue: Promise<unknown> = Promise.resolve();
@@ -58,47 +54,44 @@ async function archiveFetch(url: string, tries = 4): Promise<Response> {
 
 const dateOf = (ts: string) => `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`;
 
-// one capture a month of each page that boots the app, oldest first
-export async function listCaptures(from: number, to: number): Promise<Capture[]> {
-	const found = new Map<string, Capture>();
-	for (const page of PAGES) {
-		const url = `${ARCHIVE}/cdx/search/cdx?url=${encodeURIComponent(page)}&from=${from}&to=${to}&output=txt&fl=timestamp&filter=statuscode:200&collapse=timestamp:6`;
-		const res = await archiveFetch(url);
-		if (!res.ok) throw new Error(`The archive's index answered ${res.status}.`);
-		for (const timestamp of (await res.text()).split("\n").map((l) => l.trim()).filter((l) => STAMP.test(l)))
-			found.set(`${page}@${timestamp}`, { timestamp, page, date: dateOf(timestamp) });
-	}
-	return [...found.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+export function listCaptures(from: number, to: number) {
+	return CATALOG.filter(({ timestamp }) => {
+		const year = Number(timestamp.slice(0, 4));
+		return year >= from && year <= to;
+	}).map((capture) => ({ ...capture, date: dateOf(capture.timestamp) }));
 }
 
 let busy = false;
 
-// Take one capture into the library as <id>. The entry scripts are downloaded
-// now, so a build that can't be rebuilt from the archive is refused rather than
-// left half there.
-export async function importCapture(timestamp: string, page: string, id?: string): Promise<{ id: string; sha: string; date: string; existing: boolean }> {
+async function captureHtml(timestamp: string, page: string) {
+	const res = await archiveFetch(`${ARCHIVE}/web/${timestamp}id_/https://${page}`);
+	if (!res.ok) throw new Error(`Wayback could not check ${page} (${res.status}).`);
+	const html = await readUpTo(res, 8 * 1024 * 1024);
+	if (!html?.length) throw new Error("The capture is empty or too large.");
+	return html.toString("utf8");
+}
+
+export async function importCapture(timestamp: string, page: string, id?: string): Promise<ArchiveImport> {
 	if (!STAMP.test(timestamp)) throw new Error("Bad capture time.");
-	if (!PAGES.includes(page)) throw new Error("That page isn't one the archive import knows.");
+	if (!PAGES.includes(page) && !LITE_PAGES.includes(page)) throw new Error("That page isn't one the archive import knows.");
+	const name = id?.trim();
+	if (name && (!ID_NAME.test(name) || name === "." || name === ".." || name.startsWith(".import-"))) throw new Error("Enter a valid build name using letters, numbers, dots, dashes or underscores.");
 	if (busy) throw new Error("An archive import is already running.");
 	busy = true;
 	try {
-		const res = await archiveFetch(`${ARCHIVE}/web/${timestamp}id_/https://${page}`);
-		if (!res.ok) throw new Error(`The archive has no usable copy of ${page} at that time (${res.status}).`);
-		const html = await res.text();
+		const html = await captureHtml(timestamp, page);
 		let snap: ReturnType<typeof snapshotPage>;
 		try {
-			// the capture's own time, not the (nearest) one the archive returned
 			snap = snapshotPage(html, new Date(`${dateOf(timestamp)}T${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}:${timestamp.slice(12, 14)}Z`));
-		} catch (e: any) {
-			throw new Error(`That capture isn't usable: ${e.message}.`);
+		} catch (e) {
+			throw new Error(`That capture isn't usable: ${(e as Error).message}.`);
 		}
 		const same = listBuilds().find((b) => b.sha === snap.build.sha);
 		if (same) return { id: same.id, sha: same.sha, date: dateOf(timestamp), existing: true };
 
-		const name = id && id.trim() ? id.trim() : `${dateOf(timestamp).slice(0, 7)}-${snap.build.sha.slice(0, 8)}`;
-		if (!ID_NAME.test(name)) throw new Error("Use letters, numbers, dots, dashes or underscores.");
-		const dir = join(BUILDS_DIR, name);
-		if (existsSync(join(dir, "build.json"))) throw new Error(`There is already a build called ${name}.`);
+		const buildId = name || `${dateOf(timestamp).slice(0, 7)}-${snap.build.sha.slice(0, 8)}`;
+		const dir = join(BUILDS_DIR, buildId);
+		if (existsSync(join(dir, "build.json"))) throw new Error(`There is already a build called ${buildId}.`);
 
 		let runtime = snap.runtime;
 		if (snap.runtimeScript) {
@@ -119,7 +112,7 @@ export async function importCapture(timestamp: string, page: string, id?: string
 			rmSync(dir, { recursive: true, force: true });
 			throw e;
 		}
-		return { id: name, sha: build.sha, date: dateOf(timestamp), existing: false };
+		return { id: buildId, sha: build.sha, date: dateOf(timestamp), existing: false };
 	} finally {
 		busy = false;
 	}

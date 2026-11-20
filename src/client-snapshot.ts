@@ -7,19 +7,23 @@ import type { Build } from "./build";
 // 2020-era pages spaced the assignments and put the metadata first
 const STATE = /window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;\s*(?:window\.|<\/script>)/s;
 const META = /window\.__META_DATA__\s*=\s*(\{.*?\})\s*;\s*(?:window\.|<\/script>)/s;
-const META_KEYS = ["env", "isCanary", "isTwoffice", "hasMultiAccountCookie", "uaParserTags", "cookies", "xchatEmbedBuild"];
+const META_KEYS = ["env", "isCanary", "isTwoffice", "hasMultiAccountCookie", "uaParserTags", "userAgentTags", "cookies", "xchatEmbedBuild"];
 
 // `runtimeScript` is set for the 2018-2019 pages, whose module loader is a file
 // of its own: `runtime` is then only the chunk map the page inlines, and the
 // loader file (kept out of `build.scripts`) goes after it.
 export function snapshotPage(html: string, fetchedAt: Date = new Date()): { build: Build; runtime: string; runtimeScript?: string } {
+	const all = [...html.matchAll(/<script\b[^>]*\ssrc\s*=\s*(["'])(?:(?:https?:)?\/\/(?:abs|ma)(?:-\d+)?\.twimg\.com)?((?:\/twitter-assets)?\/responsive-web\/[A-Za-z0-9-]+\/[^"'<>]+\.js)\1/g)].map((x) => x[2]);
 	const st = STATE.exec(html);
 	const mt = META.exec(html);
-	if (!st || !mt) throw new Error("that page has no __INITIAL_STATE__/__META_DATA__, so it isn't the web app");
+	if (!st || !mt) {
+		if (all.length) throw new Error("Wayback saved web app script references, but the page is missing the startup data this importer needs");
+		if (/\/twitter-mobile\/[0-9a-f]+\/(?:assets|javascripts)\//i.test(html))
+			throw new Error("Wayback saved the older server-rendered mobile site for this capture. There is no Twitter Lite build to import");
+		throw new Error("Wayback did not save a recognizable web app on this page");
+	}
 	const state = JSON.parse(st[1]);
 	const meta = JSON.parse(mt[1]);
-	// the app's directory on the CDN changed names over the years (web, client-web, client-web-legacy)
-	const all = [...html.matchAll(/<script[^>]*src="(?:https?:\/\/abs(?:-\d+)?\.twimg\.com)?(\/responsive-web\/[A-Za-z0-9-]+\/[^"]+\.js)"/g)].map((x) => x[1]);
 	const runtimeScript = all.find((p) => /\/runtime\.[0-9a-f]+\.js$/.test(p));
 	const scripts = all.filter((p) => p !== runtimeScript);
 	const inline = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((x) => x[1]);

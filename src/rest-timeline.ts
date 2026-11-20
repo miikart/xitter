@@ -5,9 +5,10 @@
 // ranking, filters and cursors are the ones graphql.ts already has.
 
 import type { Viewer } from "./auth";
-import { eggAvatar, oldApp } from "./model";
+import { eggAvatar, usesLegacyVerification } from "./model";
 import { PostError } from "./posts";
 import { callOperation } from "./graphql";
+import { MOMENT_CARD_NAME } from "./moments";
 
 type Obj = Record<string, any>;
 
@@ -23,7 +24,7 @@ export function restUser(u: Obj): Obj {
 		location: u.location?.location ?? "",
 		url: u.website?.url || null,
 		protected: !!u.privacy?.protected,
-		verified: oldApp() && !!u.is_blue_verified,
+		verified: usesLegacyVerification() && !!u.is_blue_verified,
 		ext_is_blue_verified: !!u.is_blue_verified,
 		followers_count: u.relationship_counts?.followers ?? 0,
 		friends_count: u.relationship_counts?.following ?? 0,
@@ -56,6 +57,11 @@ function collect(result: Obj | undefined, tweets: Obj, users: Obj): string | und
 	const author = tweet.core?.user_results?.result;
 	if (author?.rest_id) users[author.rest_id] = restUser(author);
 	const legacy: Obj = { ...tweet.legacy, id_str: tweet.rest_id };
+	const card = tweet.card?.legacy;
+	if (card?.name === MOMENT_CARD_NAME) {
+		const { binding_values, user_refs_results, ...details } = card;
+		legacy.card = { ...details, binding_values: Object.fromEntries(binding_values.map(({ key, value }: Obj) => [key, value])) };
+	}
 	const repost = legacy.retweeted_status_result?.result;
 	delete legacy.retweeted_status_result;
 	const reposted = collect(repost, tweets, users);

@@ -65,6 +65,9 @@ const RULES: [RegExp, string][] = [
 	// the site's own links, also when the address is the start of a longer string
 	// or template (profile hrefs, share links); subdomains are not matched
 	[/https:\/\/x\.com(?=["'`$/?#])/g, PUBLIC_ORIGIN],
+	[/https:\/\/twitter\.com\/i\/moments\/edit\//g, `${PUBLIC_ORIGIN}/i/moments/edit/`],
+	[/https:\/\/twitter\.com\/i\/moments\//g, `${PUBLIC_ORIGIN}/i/moments/`],
+	[/https:\/\/twitter\.com\/i\/events\//g, `${PUBLIC_ORIGIN}/i/moments/`],
 	// The profile editor leaves GIFs out of its avatar and banner pickers even
 	// though the upload API and the crop patch below support animated GIFs.
 	[/(location:\w+\.rz\.(?:Avatar|ProfileBanner),mediaItem:)/g, "acceptGifs:!0,$1"],
@@ -168,6 +171,14 @@ export function patchText(text: string, chat = false): string {
 	for ([re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
 	out = patchCountryAudience(out);
 	out = patchCircleComposer(out);
+	if (out.includes("NIGHT_MODE_COOKIE")) {
+		out = out.replace(/(document\.cookie=[\w$.]+\.serialize\([\w$]+\.NIGHT_MODE_COOKIE,([\w$]+),\{maxAge:[\w$]+,path:"\/",domain:"\.twitter\.com"\}\))/g,
+			'$1,window.__xitterSaveLegacyNight&&window.__xitterSaveLegacyNight($2)');
+	}
+	if (out.includes('devicePersistence.get("rweb.settings")') || out.includes('persistence.get("rweb.settings")')) {
+		out = out.replace(/((?:devicePersistence|persistence)\.get\("rweb\.settings"\)\.then\(function\(([\w$]+)\)\{if\(\2\)\{var ([\w$]+)=\2\.local;)/g,
+			'$1if(window.__xitterSavedThemeSettings)$3=window.__xitterSavedThemeSettings($3);');
+	}
 	if (!out.includes("ConversationControlsQuery")) return out;
 	// newer clients pass more props between options and value (requiresSelection:n=!1)
 	return out.replace(/function [\w$]+\(\{onApply:[\w$]+,onBack:[\w$]+,options:([\w$]+),(?:[\w$]+:[\w$]+(?:=[\w$!.]{1,20})?,){0,4}value:[\w$]+\}\)\{let\[[\w$]+,[\w$]+\]=([\w$]+)\.useState\([\s\S]{0,16000}?(?=let [\w$]+=[\w$]+\.A\.create)/g, (picker, options, react) => {

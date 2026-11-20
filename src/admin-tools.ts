@@ -23,7 +23,7 @@ import { checkForUpdate, updateStatus } from "./update-check";
 import { selfUpdateEnabled, selfUpdateReady, selfUpdateStatus, startRollback, startSelfUpdate, updateTarget } from "./self-update";
 import { reauthenticate } from "./superadmin";
 import { BACKUP_DIR, BACKUP_INTERVALS, MAX_BACKUPS_KEPT, createBackup, deleteBackup, listBackups } from "./backups";
-import { importCapture, listCaptures } from "./client-archive";
+import { ARCHIVE_FIRST_YEAR, importCapture, listCaptures } from "./client-archive";
 import { clientStatus, latestSha, listBuilds, rollbackClient, saveCurrentBuild, updateClient, useBuild } from "./client-update";
 import { decideImport, pendingImports } from "./archive-import";
 
@@ -800,7 +800,7 @@ export const toolActions: Record<string, Action> = {
 	},
 
 	// client-update.ts
-	client: { role: "admin", run: async () => ({ ...clientStatus(), builds: listBuilds() }) },
+	client: { role: "admin", run: async () => ({ ...clientStatus(), builds: listBuilds(), archiveFrom: ARCHIVE_FIRST_YEAR }) },
 	checkClient: {
 		role: "admin",
 		run: async () => ({ latest: await latestSha().catch((e: Error) => { throw new AdminError(e.message); }), ...clientStatus() }),
@@ -845,15 +845,13 @@ export const toolActions: Record<string, Action> = {
 			return { sha };
 		},
 	},
-	// the Internet Archive's captures of the web app, one a month from `from` on
-	// (2018 is the earliest year it has pages for), and taking one into the library
 	archiveCaptures: {
 		role: "admin",
 		run: async (_a, b) => {
 			const now = new Date().getUTCFullYear();
-			const from = Math.min(Math.max(Math.trunc(Number(b.from)) || 2018, 2018), now);
+			const from = Math.min(Math.max(Math.trunc(Number(b.from)) || ARCHIVE_FIRST_YEAR, ARCHIVE_FIRST_YEAR), now);
 			const to = Math.min(Math.max(Math.trunc(Number(b.to)) || now, from), now);
-			return { captures: await listCaptures(from, to).catch((e: Error) => { throw new AdminError(e.message); }) };
+			return { captures: listCaptures(from, to) };
 		},
 	},
 	importArchivedBuild: {

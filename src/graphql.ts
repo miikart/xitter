@@ -34,7 +34,7 @@ import { notificationsTimeline, unreadCount } from "./notifications";
 import { cachedTrends, searchPosts, searchUsers } from "./search";
 import { isId, newId } from "./ids";
 import { attachMedia } from "./media";
-import { type ThreadItem, cursorEntry, feedEntry, gridAppend, gridEntry, pinnedEntry, promotedEntry, showMoreThreadsEntry, threadEntry, threadItems, tombstoneEntry, tweetEntry, tweetResult, userEntry, userResult } from "./model";
+import { type ThreadItem, cursorEntry, feedEntry, gridAppend, gridEntry, legacyUser, pinnedEntry, promotedEntry, showMoreThreadsEntry, threadEntry, threadItems, tombstoneEntry, tweetEntry, tweetResult, userEntry, userResult } from "./model";
 import { MORE_PER_PAGE, type Placed, THREADS_PER_PAGE, conversationThreads } from "./threads";
 import {
 	PostError,
@@ -89,6 +89,14 @@ const SUSPENDED_USER = {
 // in the slot by the name; to everyone else, the suspended screen
 const suspendedUser = (viewer: Viewer, user: User) =>
 	seesSuspended(viewer) ? userResult({ ...user, automated_by: null, parody_label: "None", label: { text: "Suspended", badge_id: null, url: null } }) : SUSPENDED_USER;
+
+// 2019-era GraphQL clients read rest_id and legacy straight off data.user /
+// data.viewer.user rather than data.user.result / data.viewer.user_results.result.
+const legacyGraphqlUser = (user: User, res: ReturnType<typeof userResult>) => ({
+	rest_id: user.id,
+	legacy: { id: user.id, ...legacyUser(user) },
+	affiliates_highlighted_label: res.affiliates_highlighted_label,
+});
 
 const PARODY_LABELS = new Set(["None", "Parody", "Commentary", "Fan"]);
 // the client's confirm dialog says a change locks the label for 48 hours
@@ -417,21 +425,23 @@ const createTweet: Handler = async (viewer, vars) => {
 };
 
 // every profile tab is read from the same place in the response
-const userTimeline = (entries: unknown[]) => ({
-	data: {
-		user: {
-			result: {
-				__typename: "User",
-				timeline: {
-					timeline: {
-						instructions: [{ type: "TimelineAddEntries", entries }],
-						metadata: { scribeConfig: { page: "profileBest" } },
-					},
+const userTimeline = (entries: unknown[]) => {
+	const timeline = {
+		instructions: [{ type: "TimelineAddEntries", entries }],
+		metadata: { scribeConfig: { page: "profileBest" } },
+	};
+	return {
+		data: {
+			user: {
+				timeline,
+				result: {
+					__typename: "User",
+					timeline: { timeline },
 				},
 			},
 		},
-	},
-});
+	};
+};
 
 function userId(vars: Vars): string {
 	if (!isId(vars.userId)) throw new PostError("Invalid user id.", 50);
@@ -739,10 +749,14 @@ const handlers: Record<string, Handler> = {
 		const user = name ? ((await userByName(v.id, name)) ?? (name.includes("@") && (await lookupRemoteUser(name).catch(() => undefined)) ? await userByName(v.id, name) : undefined)) : undefined;
 		// an empty answer makes the client show "this account doesn't exist"
 		if (!user) return { data: {} };
-		if (user.status === "suspended") return { data: { user: { result: suspendedUser(v, user) } } };
+		if (user.status === "suspended") {
+			const res = suspendedUser(v, user);
+			return { data: { user: { result: res, ...(seesSuspended(v) ? legacyGraphqlUser(user, res as ReturnType<typeof userResult>) : {}) } } };
+		}
 		// a visit for the profile's analytics, once a day per visitor
 		if (user.id !== v.id) sql`insert into profile_visits (profile_id, visitor_id) values (${user.id}::bigint, ${v.id}::bigint) on conflict do nothing`.catch(() => {});
-		return { data: { user: { result: userResult(user) } } };
+		const res = userResult(user);
+		return { data: { user: { result: res, ...legacyGraphqlUser(user, res) } } };
 	},
 	// "About this account" (/<name>/about)
 	AboutAccountQuery: async (v, vars) => {
@@ -779,8 +793,13 @@ const handlers: Record<string, Handler> = {
 	},
 	UserByRestId: async (v, vars) => {
 		const user = await userById(v.id, userId(vars));
-		if (user?.status === "suspended") return { data: { user: { result: suspendedUser(v, user) } } };
-		return { data: user ? { user: { result: userResult(user) } } : {} };
+		if (user?.status === "suspended") {
+			const res = suspendedUser(v, user);
+			return { data: { user: { result: res, ...(seesSuspended(v) ? legacyGraphqlUser(user, res as ReturnType<typeof userResult>) : {}) } } };
+		}
+		if (!user) return { data: {} };
+		const res = userResult(user);
+		return { data: { user: { result: res, ...legacyGraphqlUser(user, res) } } };
 	},
 	UsersByRestIds: async (v, vars) => {
 		const ids: unknown[] = Array.isArray(vars.userIds) ? vars.userIds.slice(0, 100) : [];
@@ -1172,13 +1191,21 @@ Object.assign(handlers, {
 	Viewer: async (v: Viewer) => {
 		const u = await userById(v.id, v.id);
 		if (!u) throw new PostError("User not found.", 50);
+		const res = userResult(u);
 		return {
 			data: {
 				is_super_follow_subscriber: false,
-				viewer: { create_community_action_result: { __typename: "CommunityCreateAction" }, user_features: [], user_results: { result: userResult(u) } },
+				viewer: {
+					create_community_action_result: { __typename: "CommunityCreateAction" },
+					user: legacyGraphqlUser(u, res),
+					user_features: [],
+					user_results: { result: res },
+				},
 			},
 		};
 	},
+	ViewerTeams: () => ({ data: { viewer: { teams: { act_as: [] } } } }),
+	ViewerEmailSettings: () => ({ data: { viewer: { user: { notifications_email_notifications: {} } } } }),
 	GetUserClaims: () => ({ data: { viewer_v2: { claims: [] } } }),
 } satisfies Record<string, Handler>);
 Object.assign(handlers, automationHandlers);

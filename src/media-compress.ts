@@ -17,7 +17,7 @@ import { type Image, MEDIA_DIR, sniffImage } from "./media";
 import { settings } from "./settings";
 import { FFMPEG, recompressVideo, spawnLimited } from "./video";
 
-const PHOTO = new Set(["image/jpeg", "image/png", "image/webp"]);
+const PHOTO_FORMATS = new Map([["image/jpeg", "jpeg_pipe"], ["image/png", "png_pipe"], ["image/webp", "webp_pipe"]]);
 const PHOTO_MS = 30_000;
 // decoding takes about 4 bytes a pixel: a 774 KB PNG of 16000x16000 held
 // almost a gigabyte, two at a time. Bigger ones are kept as they came.
@@ -100,19 +100,22 @@ let failure: string | undefined;
 // The smaller of the photo and its re-encoding; the photo itself when it's
 // left alone (animated, or too big to decode); undefined when it couldn't be
 // tried (not a photo, or ffmpeg failed), so it can be tried again later.
-export async function shrinkPhoto(data: Buffer, image: Image): Promise<{ data: Buffer; image: Image } | undefined> {
-	if (!PHOTO.has(image.mime)) return undefined;
+export function shrinkPhoto(data: Buffer, image: Image) {
+	const { photo_max_side: side, photo_quality: quality } = settings().media;
+	return encodePhoto(data, image, `scale='min(iw,${side})':'min(ih,${side})':force_original_aspect_ratio=decrease`, quality);
+}
+
+async function encodePhoto(data: Buffer, image: Image, resize: string, quality: number, profile = false): Promise<{ data: Buffer; image: Image } | undefined> {
+	const format = PHOTO_FORMATS.get(image.mime);
+	if (!format) return undefined;
 	const shape = shapeOf(data, image.mime);
-	if (shape.animated || image.width * image.height > MAX_PIXELS) return { data, image };
-	const m = settings().media;
-	const side = m.photo_max_side;
-	const filters = [ORIENT[image.mime === "image/jpeg" ? exifOrientation(data) : 1], `scale='min(iw,${side})':'min(ih,${side})':force_original_aspect_ratio=decrease`]
-		.filter(Boolean)
-		.join(",");
-	const codec = shape.alpha ? ["-c:v", "png", "-pred", "mixed"] : ["-c:v", "mjpeg", "-q:v", String(qscale(m.photo_quality)), "-pix_fmt", "yuvj420p"];
+	if (shape.animated || image.width < 1 || image.height < 1 || image.width * image.height > MAX_PIXELS) return { data, image };
+	const filters = [ORIENT[exifOrientation(data)], resize].filter(Boolean).join(",");
+	const codec = shape.alpha ? ["-c:v", "png", "-pred", "mixed"] : ["-c:v", "mjpeg", "-q:v", String(qscale(quality)), "-pix_fmt", "yuvj420p"];
 	return inTurn(async () => {
 		const p = spawnLimited(
-			[FFMPEG, "-hide_banner", "-loglevel", "error", "-noautorotate", "-i", "pipe:0", "-frames:v", "1", "-vf", filters, "-map_metadata", "-1", ...codec, "-f", "image2pipe", "pipe:1"],
+			[FFMPEG, "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-threads", "1", "-noautorotate", "-protocol_whitelist", "pipe", "-f", format, "-i", "pipe:0",
+				"-frames:v", "1", "-vf", filters, "-map_metadata", "-1", ...codec, "-threads", "1", "-f", "image2pipe", "pipe:1"],
 			PHOTO_MS,
 			"ignore",
 			data,
@@ -128,11 +131,56 @@ export async function shrinkPhoto(data: Buffer, image: Image): Promise<{ data: B
 			failure = "ffmpeg made no picture";
 			return undefined;
 		}
-		return out.length < data.length ? { data: out, image: made } : { data, image };
+		const resized = made.width !== image.width || made.height !== image.height;
+		return out.length < data.length || (profile && resized) ? { data: out, image: made } : { data, image };
 	}).catch((e) => {
 		failure = e instanceof Error ? e.message : String(e);
 		return undefined;
 	});
+}
+
+type ProfileVariant = { body: Blob; mime: string; etag: string };
+const profileVariants = new Map<string, ProfileVariant | undefined>();
+const profileJobs = new Map<string, Promise<ProfileVariant | undefined>>();
+let profileBytes = 0;
+
+export async function profileVariant(id: string, source: Blob, mime: string, width: number, height: number): Promise<ProfileVariant | undefined> {
+	const modified = (source as Blob & { lastModified?: number }).lastModified;
+	if (!modified || !PHOTO_FORMATS.has(mime) || source.size > 32 * 1024 * 1024) return;
+	const key = `${id}-${modified}-${source.size}-${width}x${height}`;
+	if (profileVariants.has(key)) {
+		const hit = profileVariants.get(key);
+		profileVariants.delete(key);
+		profileVariants.set(key, hit);
+		return hit;
+	}
+	const pending = profileJobs.get(key);
+	if (pending) return pending;
+	if (profileJobs.size >= 16) return;
+	const job = (async () => {
+		const bytes = Buffer.from(await source.arrayBuffer());
+		const image = sniffImage(bytes);
+		if (!image || image.mime !== mime) return;
+		const crop = `crop='min(iw,ih*${width}/${height})':'min(ih,iw*${height}/${width})':exact=1`;
+		const scale = `scale='min(iw,${width})':'min(ih,${height})':flags=lanczos,setsar=1`;
+		const encoded = await encodePhoto(bytes, image, `${crop},${scale}`, 80, true);
+		if (!encoded) return;
+		const variant = encoded.data === bytes ? undefined : {
+			body: new Blob([new Uint8Array(encoded.data)]),
+			mime: encoded.image.mime,
+			etag: `"${Bun.hash(encoded.data).toString(36)}-profile"`,
+		};
+		profileVariants.set(key, variant);
+		profileBytes += variant?.body.size ?? 0;
+		for (const [oldKey, old] of profileVariants) {
+			if (profileVariants.size <= 256 && profileBytes <= 16 * 1024 * 1024) break;
+			profileVariants.delete(oldKey);
+			profileBytes -= old?.body.size ?? 0;
+		}
+		return variant;
+	})().catch(() => undefined).finally(() => profileJobs.delete(key));
+	profileJobs.set(key, job);
+	return job;
 }
 
 // an upload on its way to disk; `compressed` marks it done for the sweep below

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nightModeCookies } from "../src/themes/api";
 import { THEME_SCRIPT, LINK_SCOPES } from "../src/themes/client";
+import { patchText } from "../src/patch";
 import { deriveTokens } from "../src/themes/css";
 import { ACCENTS, DEFAULT_ACCENT, PRESETS, SWATCH_IDS, accentWire, themeColorOf } from "../src/themes/presets";
 import {
@@ -475,6 +476,7 @@ test("night_mode cookies are 0 or 2 with the shared attributes and no HttpOnly",
 	expect(dim).toEqual([`night_mode=2; ${NIGHT_MODE_ATTR}`]);
 	expect(light[0]).toBe("night_mode=0; Path=/; Max-Age=31536000; SameSite=Lax");
 	expect(dim[0]).toBe("night_mode=2; Path=/; Max-Age=31536000; SameSite=Lax");
+	expect(nightModeCookies({ kind: "native", mode: "dark" }, true)).toEqual([`night_mode=1; ${NIGHT_MODE_ATTR}`]);
 	expect(light[0]?.includes("HttpOnly")).toBe(false);
 	expect(dim[0]?.includes("HttpOnly")).toBe(false);
 	expect(nightModeCookies(null)).toEqual([]);
@@ -501,6 +503,14 @@ test("display posts a mode and link scopes repaint accent text with the link col
 	expect(THEME_SCRIPT).toContain("data-xitter-color");
 	expect(THEME_SCRIPT).toContain("seedThemeColor");
 	expect(THEME_SCRIPT).toContain("paintChecks");
+});
+
+test("archived theme changes and device settings use the saved account theme", () => {
+	const toggle = 'document.cookie=cookie.default.serialize(keys.NIGHT_MODE_COOKIE,value,{maxAge:age,path:"/",domain:".twitter.com"})';
+	const restore = 'p.devicePersistence.get("rweb.settings").then(function(t){if(t){var n=t.local;e(m(n))}})';
+	expect(patchText(toggle)).toContain("window.__xitterSaveLegacyNight(value)");
+	expect(patchText(restore)).toContain("n=window.__xitterSavedThemeSettings(n);");
+	expect(THEME_SCRIPT).toContain("(?:settings|i)");
 });
 
 test("accent ids map to X's 500s and unknown values are refused", () => {

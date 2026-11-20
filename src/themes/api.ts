@@ -71,9 +71,9 @@ export async function themeExport(req: Request, viewer: Viewer): Promise<Respons
 	});
 }
 
-export function nightModeCookies(look: Look | null): readonly string[] {
+export function nightModeCookies(look: Look | null, legacy = false): readonly string[] {
 	if (!look) return [];
-	return [`night_mode=${modeOf(look) === "light" ? "0" : "2"}; ${NIGHT_MODE_ATTR}`];
+	return [`night_mode=${modeOf(look) === "light" ? "0" : legacy ? "1" : "2"}; ${NIGHT_MODE_ATTR}`];
 }
 
 async function keepOwnedBackground(userId: string, theme: Theme, warnings: string[]): Promise<Theme> {

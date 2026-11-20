@@ -165,6 +165,11 @@ export async function setSetting<K extends Key>(key: K, value: Settings[K]) {
 	current = { ...current, [key]: value };
 }
 
+export async function resetSwitchOverrides() {
+	await sql`delete from settings where key in ('switch_overrides', 'build_switch_overrides')`;
+	current = { ...current, switch_overrides: {}, build_switch_overrides: {} };
+}
+
 // kept for callers that read one value
 export async function getSetting<K extends Key>(key: K): Promise<Settings[K]> {
 	return current[key];

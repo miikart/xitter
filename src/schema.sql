@@ -1860,3 +1860,45 @@ create table if not exists circle_members (
 create index if not exists circle_members_member_idx on circle_members (member_id);
 alter table posts add column if not exists circle_owner_id bigint references users (id) on delete cascade;
 create index if not exists posts_circle_owner_idx on posts (circle_owner_id) where circle_owner_id is not null;
+
+-- Moments (moments.ts): curated collections of posts, as the 2019 client and
+-- the /i/moments/edit/:id editor build and read them
+create table if not exists moments (
+	id bigint primary key,
+	user_id bigint not null references users (id) on delete cascade,
+	title text not null default '',
+	description text not null default '',
+	category text not null default '',
+	visibility text not null default 'private' check (visibility in ('private', 'public', 'unlisted')),
+	cover_post_id bigint references posts (id) on delete set null,
+	cover_media_id bigint references media (id) on delete set null,
+	published_at timestamptz,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+create index if not exists moments_user_idx on moments (user_id, id desc);
+
+create table if not exists moment_items (
+	moment_id bigint not null references moments (id) on delete cascade,
+	post_id bigint not null references posts (id) on delete cascade,
+	position integer not null default 0,
+	added_at timestamptz not null default now(),
+	primary key (moment_id, post_id)
+);
+create index if not exists moment_items_order_idx on moment_items (moment_id, position, added_at);
+
+create table if not exists moment_likes (
+	moment_id bigint not null references moments (id) on delete cascade,
+	user_id bigint not null references users (id) on delete cascade,
+	created_at timestamptz not null default now(),
+	primary key (moment_id, user_id)
+);
+create index if not exists moment_likes_user_idx on moment_likes (user_id, created_at desc);
+
+create table if not exists moment_subscriptions (
+	moment_id bigint not null references moments (id) on delete cascade,
+	user_id bigint not null references users (id) on delete cascade,
+	created_at timestamptz not null default now(),
+	primary key (moment_id, user_id)
+);
+create index if not exists moment_subscriptions_user_idx on moment_subscriptions (user_id, created_at desc);

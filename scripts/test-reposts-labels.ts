@@ -86,7 +86,7 @@ try {
 	const begin = async (name: string) => new TextDecoder("latin1").decode(await (await fetch(`${origin}/onboarding/web/actions/begin_login`, { method: "POST", body: new URLSearchParams({ username_or_email: name }) })).arrayBuffer());
 	check((await begin("mariuszmika_priv")).includes("at most 15 characters"), "a 16-character name says it's too long, not that underscores are wrong");
 	check((await begin("bad-name")).includes("letters, digits and underscores"), "a name with a dash says which characters work");
-	check((await begin("abc")).includes("at least 4"), "a short name says it's too short");
+	check((await begin("ab")).includes("at least 3"), "a short name says it's too short");
 } finally {
 	for (const id of made) await author.gql("DeleteTweet", { tweet_id: id });
 	await sql`update users set parody_label = ${savedLabel.parody_label}, parody_label_at = ${savedLabel.parody_label_at} where id = ${otherId}::bigint`;

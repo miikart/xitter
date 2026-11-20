@@ -18,13 +18,13 @@ import { DECORATIONS_SCRIPT } from "./decorations";
 import { THEME_SCRIPT } from "./themes/client";
 import { bootAccentCss, bootCss, fontLinks, pageChromeCss, steamMotion, type BackgroundPaint } from "./themes/css";
 import { DEFAULT_ACCENT, swatches, themeColorOf, type Accent } from "./themes/presets";
-import { clientLook, themeForClient, type Look } from "./themes/validate";
+import { clientLook, modeOf, themeForClient, type Look } from "./themes/validate";
 import { NOTICE_SCRIPT } from "./automod-notice";
 import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-picker";
 import { PRONOUNS_CSS, PRONOUNS_SCRIPT, pronounsData } from "./pronouns";
 import { CLASSIC_DETAIL_CSS, CLASSIC_DETAIL_SCRIPT } from "./classic-detail";
 import { PUBLIC_ORIGIN } from "./config";
-import { legacyUser } from "./model";
+import { legacyUser, withClassicVerification } from "./model";
 import { patchText } from "./patch";
 import { BRAND_NAME, PWA_SCRIPT, brandIcons, originalBrand, pwaHead } from "./pwa";
 import { MONEY_UI_CSS, MONEY_UI_SCRIPT } from "./money-ui";
@@ -166,8 +166,7 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_translation_feedback_enabled: { value: false },
 });
 // every build's, then the serving build's own
-const overrideSwitches = () => {
-	const sha = loadBuild()?.build.sha;
+const overrideSwitches = (sha = loadBuild()?.build.sha) => {
 	const merged = { ...settings().switch_overrides, ...(sha ? settings().build_switch_overrides[sha] : {}) };
 	return Object.fromEntries(Object.entries(merged).map(([k, value]) => [k, { value }]));
 };
@@ -178,11 +177,18 @@ const longPostSwitches = (user: User | null) => ({
 	longform_notetweets_composition_without_claims_enabled: { value: true },
 	longform_notetweets_max_weighted_character_length: { value: postLimitFor(user?.verified_type) },
 });
+const flatSwitches = {
+	responsive_web_fetch_hashflags_on_boot: { value: false },
+	responsive_web_unified_cards_moment_enabled: { value: false },
+};
+
 // the build's, then Xitter's, then an admin's; the long-post limit is the viewer's own
-const clientSwitches = (config: Record<string, unknown>, user: User | null = null) => ({
+const clientSwitches = (config: Record<string, unknown>, user: User | null = null, flat = false, sha?: string) => ({
 	...Object.fromEntries(Object.entries(config ?? {}).filter(([k]) => !HOST_SWITCHES.includes(k))),
 	...ownSwitches(),
-	...overrideSwitches(),
+	// pre-2020 clients fetch hashflag JSON straight from https://pbs.twimg.com, which CSP blocks
+	...(flat ? flatSwitches : {}),
+	...overrideSwitches(sha),
 	...longPostSwitches(user),
 });
 
@@ -191,16 +197,16 @@ const clientSwitches = (config: Record<string, unknown>, user: User | null = nul
 export function switchReport(of: Build | undefined = loadBuild()?.build) {
 	const fs = of?.featureSwitch;
 	const build = { ...(fs?.defaultConfig ?? {}), ...(fs?.config ?? {}) } as Record<string, { value: unknown }>;
-	const own = ownSwitches();
+	const own = { ...ownSwitches(), ...(fs?.flat ? flatSwitches : {}) };
 	const overrides = settings().switch_overrides;
 	const forBuild = (of && settings().build_switch_overrides[of.sha]) || {};
-	const names = [...new Set([...Object.keys(build), ...Object.keys(own), ...Object.keys(overrides), ...Object.keys(forBuild)])].sort();
+	const names = Object.keys(build).filter((name) => !HOST_SWITCHES.includes(name)).sort();
 	return names.map((name) => ({
 		name,
 		build: build[name]?.value,
-		...(name in own ? { xitter: own[name].value } : {}),
-		...(name in overrides ? { override: overrides[name] } : {}),
-		...(name in forBuild ? { buildOverride: forBuild[name] } : {}),
+		...(Object.hasOwn(own, name) ? { xitter: own[name].value } : {}),
+		...(Object.hasOwn(overrides, name) ? { override: overrides[name] } : {}),
+		...(Object.hasOwn(forBuild, name) ? { buildOverride: forBuild[name] } : {}),
 	}));
 }
 
@@ -221,25 +227,39 @@ function fillMissing(into: Record<string, any>, from: Record<string, any>) {
 	return into;
 }
 
-function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT) {
-	const state = buildState(user, fs, inCommunity, educationFlags, accent);
+function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent, sha: string, background: string | undefined) {
+	const state = withClassicVerification(!!fs.flat, () => buildState(user, fs, inCommunity, educationFlags, accent, sha));
+	if (background) state.settings.local.themeBackground = background;
 	return fs.flat ? fillMissing(state, FLAT_STATE) : state;
 }
 
-function buildState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT): Record<string, any> {
+const LEGACY_THEME_COLOR: Record<string, string> = {
+	blue500: "blue",
+	yellow500: "yellow",
+	magenta500: "red",
+	purple500: "purple",
+	orange500: "orange",
+	green500: "green",
+};
+const clientThemeColor = (accent: Accent, flat?: boolean) => {
+	const c = themeColorOf(accent);
+	return flat ? (LEGACY_THEME_COLOR[c] ?? "blue") : c;
+};
+
+function buildState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT, sha?: string): Record<string, any> {
 	return {
 		optimist: [],
 		// the 2020 builds read a timeline store these pages start empty
 		...(fs.flat ? { urt: {}, toasts: [], typeaheadUsers: { fetchStatus: "none", users: {}, denylist: {}, lastUpdated: 0, index: {} }, hashflags: { fetchStatus: "none", hashflags: {} } } : {}),
 		entities: {
-			users: user ? { entities: { [user.id]: legacyUser(user) }, errors: {}, fetchStatus: { [user.id]: "loaded" } } : { entities: {}, errors: {}, fetchStatus: {} },
+			users: user ? { entities: { [user.id]: fs.flat ? { id: user.id, ...legacyUser(user) } : legacyUser(user) }, errors: {}, fetchStatus: { [user.id]: "loaded" } } : { entities: {}, errors: {}, fetchStatus: {} },
 		},
 		// builds from before 2020 keep their switches in featureSwitch.config itself
 		featureSwitch: fs.flat
-			? { config: clientSwitches(fs.config, user), debug: {}, impression_pointers: {}, impressions: {}, keysRead: {}, featureSetToken: fs.featureSetToken, settingsVersion: fs.settingsVersion, isLoaded: true, isLoading: false }
+			? { config: clientSwitches(fs.config, user, true, sha), debug: {}, impression_pointers: {}, impressions: {}, keysRead: {}, featureSetToken: fs.featureSetToken, settingsVersion: fs.settingsVersion, isLoaded: true, isLoading: false }
 			: {
-					defaultConfig: clientSwitches(fs.defaultConfig, user),
-					user: { config: clientSwitches(fs.config, user), impression_pointers: {}, impressions: {}, keysRead: {}, settingsVersion: fs.settingsVersion },
+					defaultConfig: clientSwitches(fs.defaultConfig, user, false, sha),
+					user: { config: clientSwitches(fs.config, user, false, sha), impression_pointers: {}, impressions: {}, keysRead: {}, settingsVersion: fs.settingsVersion },
 					debug: {},
 					featureSetToken: fs.featureSetToken,
 					isLoaded: true,
@@ -251,7 +271,7 @@ function buildState(user: User | null, fs: NonNullable<ReturnType<typeof loadBui
 				nextPushCheckin: 0,
 				shouldAutoPlayGif: false,
 				scale: "normal",
-				themeColor: themeColorOf(accent),
+				themeColor: clientThemeColor(accent, fs.flat),
 				highContrastEnabled: false,
 				loginPromptLastShown: 0,
 				moneyNotificationsLastSeenSortIndex: {},
@@ -305,7 +325,23 @@ const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 // JSON placed inside a <script> must not be able to close it
 const inline = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
-let runtimePatched: { sha: string; text: string } | undefined;
+const runtimePatched = new Map<string, string>();
+
+// When 2022-11 is booted solely to host Twitter's Moment Maker on an instance running
+// another client build (e.g. 2019-07-new-twitter), navigating outside /i/moment_maker
+// reloads into the active client build cleanly.
+const MOMENT_MAKER_EXIT_SCRIPT = `<script>(function(){
+function outside(url){try{var u=new URL(url,location.href);return u.origin===location.origin&&!/^\\/i\\/moment_maker(?:\\/|$)/.test(u.pathname)?u.href:null}catch(e){return null}}
+["pushState","replaceState"].forEach(function(m){
+var orig=history[m];
+history[m]=function(s,t,u){
+var dest=u!=null?outside(String(u)):null;
+if(dest){location.assign(dest);return}
+return orig.apply(this,arguments);
+};
+});
+window.addEventListener("popstate",function(){var dest=outside(location.href);if(dest)location.assign(dest)});
+})();</script>`;
 
 // Xitter's own scripts are the same on every page (one set signed in, one
 // signed out), so they come as a file the browser keeps instead of 130 KB
@@ -342,15 +378,33 @@ export const bootScript = (path: string): Buffer | undefined => boots().find((b)
 // With no user the client boots signed out, for the sign-in dialog.
 // `multi`: other accounts are signed in too (auth_multi), so the account menu
 // asks for them.
-export function shell(user: User | null, multi = false, inCommunity = false, educationFlags: Record<string, number> = {}, links: MenuLink[] = [], look: Look | null = null, accent: Accent = DEFAULT_ACCENT, paint?: BackgroundPaint, csrf?: string): string | undefined {
+export function shell(
+	user: User | null,
+	multi = false,
+	inCommunity = false,
+	educationFlags: Record<string, number> = {},
+	links: MenuLink[] = [],
+	look: Look | null = null,
+	accent: Accent = DEFAULT_ACCENT,
+	paint?: BackgroundPaint,
+	csrf?: string,
+	opts?: { build?: { build: Build; runtime: string }; momentMakerHost?: boolean },
+): string | undefined {
 	const theme = look?.kind === "painted" ? look.theme : null;
 	const brand = originalBrand(!!user);
 	const original = !!brand;
 	const clientTheme = theme ? themeForClient(theme) : null;
-	const loaded = loadBuild();
+	const loaded = opts?.build ?? loadBuild();
 	if (!loaded) return undefined;
 	const { build, runtime } = loaded;
-	if (runtimePatched?.sha !== build.sha) runtimePatched = { sha: build.sha, text: patchText(runtime) };
+	const savedLook = clientLook(look ?? null, accent);
+	const background = look ? (modeOf(look) === "light" ? "light" : "darker") : undefined;
+	const signup = !user && settings().signup_mode !== "closed" && !settings().operations.maintenance;
+	let patchedRuntime = runtimePatched.get(build.sha);
+	if (!patchedRuntime) {
+		patchedRuntime = patchText(runtime);
+		runtimePatched.set(build.sha, patchedRuntime);
+	}
 	// the chat build's address is ours (the rest of the metadata stays as captured:
 	// the client decides from it where its csrf header goes)
 	const chatBuild = build.meta.xchatEmbedBuild;
@@ -362,7 +416,7 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0,viewport-fit=cover" />
 <meta name="theme-color" content="${theme ? esc(theme.bg.stops[0] ?? "#000000") : "#000000"}" /><title>${brand ? BRAND_NAME[brand] : esc(settings().instance_name)}</title>
 <link rel="icon" type="image/png" href="${brandIcons(brand).icon}" />${pwaHead(brand)}${fontLinks(theme)}
-<style>html,body{height:100%}body{margin:0;background-color:${build.featureSwitch.flat ? "#fff" : "#000"}}
+<style>html,body{height:100%}body{margin:0;background-color:${build.featureSwitch.flat || opts?.momentMakerHost ? "#fff" : "#000"}}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 @media (display-mode:standalone){body{overscroll-behavior-y:none}}${original ? "" : LOGO_CSS}
 ${hideCss()}
@@ -373,13 +427,16 @@ ${CONVERSATION_CARD_CSS}
 ${COMPOSER_BUTTON_CSS}
 ${user ? MONEY_UI_CSS : ""}
 ${user?.classic_post_details ? CLASSIC_DETAIL_CSS : ""}
+${signup ? '#xitter-signup{position:fixed;top:max(16px,env(safe-area-inset-top));right:16px;z-index:2;padding:8px 16px;border:1px solid #536471;border-radius:999px;background:#0f1419;color:#eff3f4;font:600 14px system-ui,sans-serif;text-decoration:none}' : ""}
 [data-testid="sidebarColumn"] div:has(> [data-testid="emptyState"]),[data-testid="sidebarColumn"] div:has(> div > aside) ~ div:empty{display:none}</style>
 </head><body><div id="react-root" style="height:100%;display:flex;"></div>
-<script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags, accent))};window.__META_DATA__=${inline(meta)};</script>
-<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), classicDetail: !!user?.classic_post_details, circles: !!user && feature("circles"), tidy: tidyData(links), theme: clientTheme, look: clientLook(look, accent), accent: clientLook(look, accent).accent, themeColor: themeColorOf(accent), themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
+${signup ? '<a id="xitter-signup" href="/signup">Create an account</a>' : ""}
+<script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags, accent, build.sha, background))};window.__META_DATA__=${inline(meta)};</script>
+<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), classicDetail: !!user?.classic_post_details, circles: !!user && feature("circles"), tidy: tidyData(links), theme: clientTheme, look: { ...savedLook, night: build.featureSwitch.flat && savedLook.night === "2" ? "1" : savedLook.night }, accent: savedLook.accent, themeBackground: background, themeColor: clientThemeColor(accent, build.featureSwitch.flat), legacyThemeColor: !!build.featureSwitch.flat, themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
 <script src="${bootFor(!!user).path}"></script>
 <script id="nonce-csp"></script>
-<script>${runtimePatched.text}</script>
+<script>window.__SCRIPTS_LOADED__=window.__SCRIPTS_LOADED__||{};${patchedRuntime}</script>
+${opts?.momentMakerHost ? MOMENT_MAKER_EXIT_SCRIPT : ""}
 ${scripts}
 </body></html>`;
 }

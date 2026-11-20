@@ -1,10 +1,16 @@
 // The rules page, and sign-in by form post for scripts. People sign in and up
 // in X's own dialog, served by onboarding.ts.
 
-import { recordSignIn } from "./login-history";
-import { login, sessionCookies } from "./auth";
+import { recordSignIn, requestCountry, requestIp } from "./login-history";
+import { signInCookies } from "./accounts";
+import { login, parseCookies, SECURE, sessionCookies, startSession } from "./auth";
+import { sql } from "./db";
+import { checkSignupCode, sendSignupCode } from "./email-address";
+import { checkSignup, normalizeCode, signUp, SignupError, validInviteCode } from "./invites";
+import { mailEnabled } from "./mail";
+import { webSource } from "./platforms";
 import { loadLook, nightModeCookies } from "./themes/api";
-import { passwordTry } from "./ratelimit";
+import { hit, passwordTry } from "./ratelimit";
 import { settings } from "./settings";
 
 export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -18,7 +24,8 @@ export const layout = (title: string, body: string) => `<!doctype html>
 <link rel="icon" type="image/png" href="/public/favicon.png">
 <style>
 	.logo { width: 200px; margin: 0 0 16px; }
-	body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #000; color: #e7e9ea; font: 15px system-ui, sans-serif; }
+	body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: 1fr auto; background: #000; color: #e7e9ea; font: 15px system-ui, sans-serif; }
+	main { display: grid; place-items: center; }
 	form { width: min(560px, calc(100vw - 32px)); display: grid; gap: 12px; padding: 32px 0; }
 	h1 { margin: 0 0 8px; font-size: 28px; }
 	.alt { margin: 8px 0 0; color: #71767b; }
@@ -38,21 +45,23 @@ export const layout = (title: string, body: string) => `<!doctype html>
 	.item.warning { border-color: rgba(255,212,0,.4); }
 	.error { color: #f4212e; margin: 0; }
 	[hidden] { display: none !important; }
-	.source { position: fixed; bottom: 12px; left: 0; right: 0; text-align: center; color: #71767b; font-size: 13px; }
+	.source { padding: 12px 16px; text-align: center; color: #71767b; font-size: 13px; }
 </style>
 </head>
 <body>
+<main>
 ${body}
-<p class="source">${esc(settings().instance_name)} runs <a href="${esc(settings().source_url)}">open source</a> software (AGPL-3.0)</p>
+</main>
+<footer class="source">${esc(settings().instance_name)} runs <a href="${esc(settings().source_url)}">open source</a> software (AGPL-3.0)</footer>
 </body>
 </html>`;
 
 export const html = (body: string, status = 200) =>
 	new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 
-async function signedIn(session: { token: string; csrf: string; userId: string }): Promise<Response> {
+async function signedIn(session: { token: string; csrf: string; userId: string }, cookies = sessionCookies(session)): Promise<Response> {
 	const headers = new Headers({ location: "/home" });
-	for (const c of sessionCookies(session)) headers.append("set-cookie", c);
+	for (const c of cookies) headers.append("set-cookie", c);
 	for (const c of nightModeCookies(await loadLook(session.userId))) headers.append("set-cookie", c);
 	return new Response(null, { status: 303, headers });
 }
@@ -96,7 +105,7 @@ export function loginPage(message = "", status = 200): Response {
 	<label for="password">Password</label>
 	<input id="password" name="password" type="password" autocomplete="current-password" required>
 	<button>Log in</button>
-	<p class="alt">Sign-up on this instance is invite-only; an admin makes accounts.</p>
+	${settings().signup_mode === "closed" ? "" : '<p class="alt"><a href="/signup">Create an account</a></p>'}
 </form>`,
 		),
 		status,
@@ -111,18 +120,105 @@ export async function loginForm(req: Request): Promise<Response> {
 	return loginPage("Wrong username or password.", 401);
 }
 
-// An archived client's "Sign up" goes to /i/flow/signup; sign-up here is invite-only
-export function signupPage(): Response {
-	return html(
-		layout(
-			"Sign up",
-			`<form>
+function signupPage(values: Record<string, string> = {}, message = "", status = 200, verification?: { token: string; email: string }): Response {
+	const mode = settings().signup_mode;
+	const body = mode === "closed"
+		? "<p>Sign-up is closed on this instance.</p>"
+		: verification
+			? `<p>Enter the code sent to ${esc(verification.email)}.</p>
+	<input name="token" type="hidden" value="${esc(verification.token)}">
+	<label for="email-code">Email verification code</label>
+	<input id="email-code" name="email_code" inputmode="numeric" autocomplete="one-time-code" required autofocus>
+	<button>Verify email</button>`
+			: `<label for="username">Username</label>
+	<input id="username" name="username" value="${esc(values.username ?? "")}" minlength="3" maxlength="15" pattern="[A-Za-z0-9_]+" autocomplete="username" autocapitalize="none" required autofocus>
+	<label for="name">Display name (optional)</label>
+	<input id="name" name="name" value="${esc(values.name ?? "")}" maxlength="50" autocomplete="nickname">
+	<label for="email">Email</label>
+	<input id="email" name="email" type="email" value="${esc(values.email ?? "")}" maxlength="254" autocomplete="email" required>
+	<label for="password">Password</label>
+	<input id="password" name="password" type="password" minlength="8" maxlength="256" autocomplete="new-password" required>
+	<label for="invite">Invite code${mode === "open" ? " (optional)" : ""}</label>
+	<input id="invite" name="invite" value="${esc(values.invite ?? "")}" ${mode === "invite" ? "required" : ""}>
+	<p class="alt">Read the <a href="/rules">instance rules</a> before signing up.</p>
+	<button>Create account</button>`;
+	return html(layout("Create an account", `<form method="post" action="/signup">
 	<img class="logo" src="/public/logo-dark.png" alt="${esc(settings().instance_name)}">
-	<h1>Sign-up is invite-only</h1>
-	<p class="alt">Ask an admin of ${esc(settings().instance_name)} for an invite code, or have them make the account for you. If you already have one, <a href="/login">log in</a>.</p>
-</form>`,
-		),
-	);
+	<h1>Create an account</h1>
+	${message ? `<p class="error" role="alert">${esc(message)}</p>` : ""}
+	${body}
+	<p class="alt">Already have an account? <a href="/login">Log in</a>.</p>
+</form>`), mode === "closed" ? 403 : status);
+}
+
+export async function signupRoute(req: Request, url: URL): Promise<Response> {
+	const mode = settings().signup_mode;
+	if (mode === "closed") return signupPage();
+	if (req.method === "GET") {
+		const linked = url.searchParams.get("code");
+		if (linked) {
+			const code = normalizeCode(linked);
+			return new Response(null, { status: 302, headers: {
+				location: "/signup",
+				"cache-control": "no-store",
+				"set-cookie": `xitter_invite=${code}; Path=/; Max-Age=1800; SameSite=Lax; HttpOnly${SECURE}`,
+			} });
+		}
+		return signupPage({ invite: parseCookies(req).xitter_invite ?? "" });
+	}
+	const ip = requestIp(req);
+	if (!hit("auth", ip ?? "unknown").ok) return signupPage({}, "Too many attempts. Try again later.", 429);
+	const { password = "", token, email_code, ...values } = await fields(req);
+	const country = requestCountry(req) ?? null;
+	const source = webSource();
+	let userId: string;
+	let verification: { token: string; email: string } | undefined;
+	try {
+		if (token) {
+			if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(token)) throw new SignupError("Start sign-up again to get a new code.");
+			const [row] = await sql`select code, pending from signup_sessions
+				where token = ${token}::uuid and pending is not null and created_at > now() - interval '30 minutes'`;
+			if (!row) throw new SignupError("Start sign-up again to get a new code.");
+			verification = { token, email: row.pending.email };
+			const result = await checkSignupCode(token, email_code ?? "");
+			if (result === "wrong") throw new SignupError("That email code is incorrect.");
+			if (result === "expired") {
+				verification = undefined;
+				throw new SignupError("That email code has expired. Start sign-up again.");
+			}
+			userId = await signUp({ ...row.pending, code: row.code, emailVerified: true, ip: ip ?? row.pending.ip });
+			await sql`delete from signup_sessions where token = ${token}::uuid`;
+		} else {
+			const invite = values.invite?.trim();
+			const code = invite ? await validInviteCode(invite) : "";
+			if (code === undefined || (mode === "invite" && !code)) throw new SignupError("That invite code is not valid or has been used up.");
+			const form = { code, screenName: values.username ?? "", name: values.name ?? "", email: values.email ?? "", password, ip };
+			if (mailEnabled()) {
+				const checked = await checkSignup(form);
+				if (!hit("mail", ip ?? "unknown").ok) return signupPage(values, "Too many codes sent from here. Wait an hour.", 429);
+				const pending = { ...checked, ip, country, source, passwordHash: await Bun.password.hash(password) };
+				const token = crypto.randomUUID();
+				await sql`delete from signup_sessions where created_at < now() - interval '30 minutes'`;
+				await sql`insert into signup_sessions (token, username, code, pending)
+					values (${token}::uuid, ${pending.screenName}, ${code}, ${JSON.stringify(pending)}::text::jsonb)`;
+				try {
+					await sendSignupCode(token, pending.email);
+				} catch {
+					await sql`delete from signup_sessions where token = ${token}::uuid`;
+					return signupPage(values, "The email code could not be sent. Try again later.", 503);
+				}
+				return signupPage({}, "", 200, { token, email: pending.email });
+			}
+			userId = await signUp({ ...form, country, source });
+		}
+	} catch (e) {
+		if (!(e instanceof SignupError)) throw e;
+		return signupPage(values, e.message, 400, verification);
+	}
+	const session = await startSession(userId);
+	const response = await signedIn(session, await signInCookies(req, session));
+	response.headers.append("set-cookie", `xitter_invite=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly${SECURE}`);
+	return response;
 }
 
 // shown while an admin has maintenance mode on: to signed-in accounts, and to

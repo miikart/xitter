@@ -115,6 +115,11 @@ try {
 	// client page (updating needs x.com, so only the status here)
 	const client = (await admin.admin("client")).data;
 	check(typeof client.sha === "string" && "previous" in client, "client status");
+	check(client.archiveFrom === 2018, "the archive picker starts at 2018");
+	const catalog = (await admin.admin("archiveCaptures", { from: 2018, to: 2018 })).data.captures;
+	check(catalog.some((c: any) => c.kind === "responsive" && c.page === "twitter.com/home" && c.date === "2018-06-05"), "the local catalog lists checked responsive captures");
+	check(catalog.some((c: any) => c.kind === "indexed" && c.page === "mobile.twitter.com/"), "the catalog also includes indexed pages awaiting an import check");
+	check(catalog.every((c: any) => c.kind !== "classic" && c.date.startsWith("2018-")), "the catalog excludes classic desktop captures and respects its year range");
 	check((await support.admin("client")).status === 403, "client is admin only");
 
 	// members' invites

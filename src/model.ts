@@ -39,14 +39,15 @@ const DEFAULT_AVATAR = `${PUBLIC_ORIGIN}/abs/sticky/default_profile_images/defau
 // from one runs inside withEggs(), everything else keeps X's default picture.
 const eggs = new AsyncLocalStorage<boolean>();
 export const withEggs = <T>(ua: string, fn: () => T): T => eggs.run(wantsEggs(ua), fn);
+const classicVerification = new AsyncLocalStorage<boolean>();
+export const withClassicVerification = <T>(enabled: boolean, fn: () => T): T => classicVerification.run(enabled, fn);
+export const usesLegacyVerification = () => !!(eggs.getStore() || classicVerification.getStore());
 export function wantsEggs(ua: string) {
 	const m = /^Twitter(?: for |-|)(Android|iPhone|iPad|iPod)\/(\d+)\.(\d+)/i.exec(ua);
 	if (!m) return false;
 	const major = Number(m[2]), minor = Number(m[3]);
 	return /^android$/i.test(m[1]) ? major < 6 || (major === 6 && minor < 40) : major < 7;
 }
-// the old apps know only `verified`, and show it for any badge
-export const oldApp = () => !!eggs.getStore();
 export const eggUrl = (id: string | number | bigint) => `${PUBLIC_ORIGIN}/public/default_profile_${Number(BigInt(id) % 7n)}_normal.png`;
 const isDefaultAvatar = (url: string | null | undefined) => !url || url.includes("default_profile_images");
 export const eggAvatar = (url: string | null | undefined, id: string | number | bigint) =>
@@ -354,7 +355,7 @@ export function legacyUser(u: User) {
 		super_followed_by: false,
 		super_following: false,
 		verified_user_profiles: { super_follows_user_profile: { is_active: false } },
-		verified: oldApp() && isVerified(u),
+		verified: usesLegacyVerification() && isVerified(u),
 		protected: !!u.protected,
 		profile_image_url_https: eggAvatar(absolute(u.avatar_url), u.id),
 		...(u.banner_url ? { profile_banner_url: absolute(u.banner_url) } : {}),

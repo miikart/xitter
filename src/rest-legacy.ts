@@ -10,6 +10,26 @@ import type { Viewer } from "./auth";
 import { blockedIds } from "./blocks";
 import { callOperation } from "./graphql";
 import { apiDate, legacyUser } from "./model";
+import {
+	addMomentPost,
+	createMoment,
+	curateMetadataV1,
+	curateMomentTimeline,
+	deleteMoment,
+	momentCapsuleTimeline,
+	momentCapsuleV1,
+	momentLikersTimeline,
+	momentLiveEventMetadata,
+	momentLiveEventTimeline,
+	publishMomentV1,
+	removeMomentPost,
+	reorderMomentPosts,
+	setMomentLike,
+	setMomentSubscription,
+	updateMoment,
+	updateMomentV1,
+	userMomentsTimeline,
+} from "./moments";
 import { PostError, setPinned } from "./posts";
 import { followList, setFollow, userById, userByName, usersByIds } from "./users";
 import { unreadCount } from "./notifications";
@@ -162,10 +182,6 @@ const ACK = [
 	"/1.1/geo/delete_location_data.json",
 	"/1.1/mobile/settings/get.json",
 	"/1.1/mobile/settings/save.json",
-	"/1.1/moments/like.json",
-	"/1.1/moments/unlike.json",
-	"/1.1/moments/subscribe.json",
-	"/1.1/moments/unsubscribe.json",
 	"/1.1/onboarding/task.json",
 	"/1.1/prompts/record_event.json",
 	"/1.1/push_destinations/destroy.json",
@@ -212,6 +228,48 @@ const POST: Record<string, Handler> = {
 	"/1.1/account/password_strength.json": () => ({ valid: true, score: 1 }),
 	"/1.1/guest/activate.json": () => ({ guest_token: String(Date.now()) }),
 	"/1.1/signup/sms_verify_begin.json": () => gone("Phone numbers are not used here.", 214, 403),
+	"/1.1/moments/create.json": async (v, q) =>
+		createMoment(v, {
+			title: q.get("title") ?? undefined,
+			description: q.get("description") ?? undefined,
+			category: q.get("category") ?? q.get("subcategory_string") ?? undefined,
+			visibility: q.get("visibility") ?? q.get("visibility_mode") ?? undefined,
+			tweet_ids: (q.get("tweet_ids") ?? "").split(",").filter(isId),
+		}),
+	"/1.1/moments/update.json": async (v, q) => {
+		const id = q.get("moment_id") ?? q.get("id") ?? "";
+		return updateMoment(v, id, {
+			title: q.has("title") ? (q.get("title") ?? "") : undefined,
+			description: q.has("description") ? (q.get("description") ?? "") : undefined,
+			category: q.has("category") ? (q.get("category") ?? "") : q.has("subcategory_string") ? (q.get("subcategory_string") ?? "") : undefined,
+			visibility: q.get("visibility") ?? q.get("visibility_mode") ?? undefined,
+			cover_post_id: q.has("cover_post_id") ? (q.get("cover_post_id") || null) : q.has("cover_tweet_id") ? (q.get("cover_tweet_id") || null) : undefined,
+			cover_media_id: q.has("cover_media_id") ? (q.get("cover_media_id") || null) : undefined,
+		});
+	},
+	"/1.1/moments/delete.json": async (v, q) => deleteMoment(v, q.get("moment_id") ?? q.get("id") ?? ""),
+	"/1.1/moments/like.json": async (v, q) => setMomentLike(v, q.get("moment_id") ?? q.get("id") ?? "", true),
+	"/1.1/moments/unlike.json": async (v, q) => setMomentLike(v, q.get("moment_id") ?? q.get("id") ?? "", false),
+	"/1.1/moments/subscribe.json": async (v, q) => setMomentSubscription(v, q.get("moment_ids") ?? q.get("moment_id") ?? q.get("id") ?? "", true),
+	"/1.1/moments/unsubscribe.json": async (v, q) => setMomentSubscription(v, q.get("moment_ids") ?? q.get("moment_id") ?? q.get("id") ?? "", false),
+	"/1.1/moments/add_tweet.json": async (v, q) => {
+		const momentId = q.get("moment_id") ?? q.get("id") ?? "";
+		const postRef = q.get("tweet_id") ?? q.get("post_id") ?? q.get("post_ref") ?? "";
+		await addMomentPost(v, momentId, postRef);
+		return momentCapsuleTimeline(v, momentId);
+	},
+	"/1.1/moments/remove_tweet.json": async (v, q) => {
+		const momentId = q.get("moment_id") ?? q.get("id") ?? "";
+		const postId = q.get("tweet_id") ?? q.get("post_id") ?? "";
+		await removeMomentPost(v, momentId, postId);
+		return momentCapsuleTimeline(v, momentId);
+	},
+	"/1.1/moments/reorder.json": async (v, q) => {
+		const momentId = q.get("moment_id") ?? q.get("id") ?? "";
+		const ids = (q.get("tweet_ids") ?? q.get("post_ids") ?? "").split(",").map((s) => s.trim()).filter(isId);
+		await reorderMomentPosts(v, momentId, ids);
+		return momentCapsuleTimeline(v, momentId);
+	},
 	"/1.1/dm/new.json": noDirectMessages,
 	"/1.1/dm/destroy.json": noDirectMessages,
 };
@@ -260,7 +318,16 @@ const URT = async (path: string, viewer: Viewer, q: URLSearchParams): Promise<un
 		return { ntab_unread_count: n, dm_unread_count: 0, total_unread_count: n };
 	}
 	if (path === "/2/guide/topic.json") return emptyTimeline("topic");
-	if (path === "/2/moments/list_user_moments.json") return emptyTimeline("moments");
+	if (path === "/2/moments/list_user_moments.json") return userMomentsTimeline(viewer, q);
+	if (path === "/2/moments/userlikes.json") return momentLikersTimeline(viewer, q);
+	const capsuleV1 = /^\/1\.1\/moments\/capsule\/(\d{1,19})\.json$/.exec(path);
+	if (capsuleV1) return momentCapsuleV1(viewer, capsuleV1[1]!);
+	const capsule = /^\/2\/moments\/capsule\/(\d{1,19})\.json$/.exec(path);
+	if (capsule) return momentCapsuleTimeline(viewer, capsule[1]!);
+	const liveMeta = /^\/1\.1\/live_event\/1\/(\d{1,19})\/timeline\.json$/.exec(path);
+	if (liveMeta) return momentLiveEventMetadata(viewer, liveMeta[1]!);
+	const liveTimeline = /^\/2\/live_event\/timeline\/(\d{1,19})\.json$/.exec(path);
+	if (liveTimeline) return (await momentLiveEventTimeline(viewer, liveTimeline[1]!)) ?? emptyTimeline("event");
 	if (/^\/2\/(live_event\/timeline|moments\/capsule)\//.test(path)) return emptyTimeline("event");
 	return undefined;
 };
@@ -273,9 +340,38 @@ export async function restLegacyRoute(method: string, path: string, viewer: View
 			return answer === undefined ? undefined : answer instanceof Response ? answer : Response.json(answer);
 		}
 		if (method !== "POST") return undefined;
+		const delMoment = /^\/1\.1\/moments\/delete\/(\d{1,19})\.json$/.exec(path);
+		if (delMoment) return Response.json(await deleteMoment(viewer, delMoment[1]!));
+		const updMoment = /^\/1\.1\/moments\/update\/(\d{1,19})\.json$/.exec(path);
+		if (updMoment) {
+			const body = (await req.json().catch(() => ({}))) as Obj;
+			return Response.json(await updateMomentV1(viewer, updMoment[1]!, body && typeof body === "object" ? body : {}));
+		}
+		const curateMoment = /^\/1\.1\/moments\/curate\/(\d{1,19})\.json$/.exec(path);
+		if (curateMoment) {
+			const body = (await req.json().catch(() => ({}))) as Obj;
+			return Response.json(await curateMomentTimeline(viewer, curateMoment[1]!, body && typeof body === "object" ? body : {}));
+		}
+		const pubMoment = /^\/1\.1\/moments\/publish\/(\d{1,19})\.json$/.exec(path);
+		if (pubMoment) return Response.json(await publishMomentV1(viewer, pubMoment[1]!));
+		const curateMeta = /^\/1\.1\/moments\/curate_metadata\/(\d{1,19})\.json$/.exec(path);
+		if (curateMeta) return Response.json(await curateMetadataV1(viewer, curateMeta[1]!));
+		const liveSub = /^\/1\.1\/live_event\/1\/(\d{1,19})\/subscription\.json$/.exec(path);
+		if (liveSub) return Response.json(await setMomentSubscription(viewer, liveSub[1]!, q.get("remind_me") !== "false"));
 		if (!ACK.includes(path) && !POST[path]) return undefined;
-		const f = await req.formData().catch(() => undefined);
-		if (f) for (const [k, v] of f) if (typeof v === "string") q.set(k, v);
+		const ct = req.headers.get("content-type") ?? "";
+		if (ct.includes("application/json")) {
+			const body = await req.json().catch(() => undefined);
+			if (body && typeof body === "object") {
+				for (const [k, v] of Object.entries(body as Obj)) {
+					if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") q.set(k, String(v));
+					else if (Array.isArray(v)) q.set(k, v.map(String).join(","));
+				}
+			}
+		} else {
+			const f = await req.formData().catch(() => undefined);
+			if (f) for (const [k, v] of f) if (typeof v === "string") q.set(k, v);
+		}
 		if (ACK.includes(path)) return Response.json({});
 		const answer = await POST[path](viewer, q);
 		return answer instanceof Response ? answer : Response.json(answer);

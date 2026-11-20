@@ -46,7 +46,10 @@ check("signed out, / is the client's home page, signed out", root.status === 200
 const home = await fetch(`${origin}/home`, { redirect: "manual" });
 check("other pages send you there", home.status === 302 && home.headers.get("location") === "/");
 const oldLogin = await fetch(`${origin}/login`, { redirect: "manual" });
-check("so does the old /login", oldLogin.status === 302 && oldLogin.headers.get("location") === "/");
+check("/login serves the plain sign-in form", oldLogin.status === 200 && (await oldLogin.text()).includes('action="/login"'));
+const signupPage = await fetch(`${origin}/signup`);
+check("the source footer follows the signup form", signupPage.status === 200 &&
+	/<form method="post" action="\/signup">[\s\S]*?<\/form>\s*<\/main>\s*<footer class="source">/.test(await signupPage.text()));
 
 // sign-in
 let s = await step("begin_login", { username_or_email: "pozo" });
@@ -79,6 +82,8 @@ let states = await typing(name);
 check("while typing, a free name shows as available", states.get(AVAILABLE) === true && states.get(TAKEN) === false);
 states = await typing("Pozo");
 check("and a taken one as taken", states.get(AVAILABLE) === false && states.get(TAKEN) === true);
+states = await typing("abc");
+check("three-character names are checked for availability", states.get(AVAILABLE) === true || states.get(TAKEN) === true);
 states = await typing("ab");
 check("and one too short as neither", states.get(AVAILABLE) === false && states.get(TAKEN) === false);
 
@@ -86,7 +91,7 @@ const setup = (o: Record<string, string>) => step("verify_signup", { session_tok
 s = await setup({ username: "settings" });
 check("reserved names are refused", /reserved/.test(s.errors.username ?? ""), s.errors);
 s = await setup({ username: "ab" });
-check("short names are refused", /at least 4/.test(s.errors.username ?? ""), s.errors);
+check("short names are refused", /at least 3/.test(s.errors.username ?? ""), s.errors);
 s = await setup({ username: "POZO" });
 check("taken names are refused, whatever the case", /taken/.test(s.errors.username ?? ""), s.errors);
 s = await setup({ password: "short" });
@@ -122,7 +127,7 @@ check("a used-up code is refused", /used up/.test(s.errors.code ?? ""), s.errors
 const linked = await createInvite();
 const link = await fetch(`${origin}/signup?code=${linked}`, { redirect: "manual" });
 const inviteCookie = link.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("xitter_invite=")) ?? "";
-check("an invite link leads to the home page and keeps the code", link.status === 302 && link.headers.get("location") === "/" && !!inviteCookie);
+check("an invite link leads to sign-up and keeps the code", link.status === 302 && link.headers.get("location") === "/signup" && !!inviteCookie);
 s = await step("begin_login", { username_or_email: `${name}c` }, inviteCookie);
 check("then a new username goes straight to account setup", shows(s, "Set up your account"));
 s = await step("verify_signup", { session_token: s.fields.session_token, name: "", username: `${name}c`, password: "testpass123", email: `${name.toLowerCase()}c@example.com` }, inviteCookie);

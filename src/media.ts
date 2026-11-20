@@ -20,7 +20,7 @@ import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { settings } from "./settings";
 import { gifProxy } from "./gifs";
-import { compressUpload } from "./media-compress";
+import { compressUpload, profileVariant } from "./media-compress";
 import { cropGif, maxVideoBytes, posterFile, progress, queueVideo, sourceFile, videoError, videoSupported } from "./video";
 
 export const MEDIA_DIR = process.env.MEDIA_DIR ?? "media";
@@ -625,7 +625,7 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 	return uploadError("Unknown command.");
 }
 
-type Served = { id: string; mime: string; owner: string; post: string | null; detached: boolean };
+type Served = { id: string; mime: string; owner: string; post: string | null; detached: boolean; avatar: boolean; banner: boolean };
 // Visibility changes, blocks and deletion must apply on the next request, and
 // authorized private bytes must not persist in browser or shared caches.
 const PRIVATE = "private, no-store";
@@ -636,7 +636,9 @@ const PRIVATE = "private, no-store";
 const REVALIDATE = "private, no-cache";
 
 async function servedOf(id: string): Promise<Served | undefined> {
-	const [row] = await sql`select id::text, mime, user_id::text as owner, post_id::text as post, detached from media where id = ${id}::bigint`;
+	const [row] = await sql`select m.id::text, m.mime, m.user_id::text as owner, m.post_id::text as post, m.detached,
+		u.avatar_url = ('/media/' || m.id) as avatar, u.banner_url = ('/media/banner/' || m.id) as banner
+		from media m join users u on u.id = m.user_id where m.id = ${id}::bigint`;
 	return row as Served | undefined;
 }
 
@@ -646,6 +648,7 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 	// only for unbound uploads so ordinary post images keep their indexed path.
 	const pollIds: string[] = served.post ? [] : (await sql`select id::text from polls where choice_media @> ${sql.array([served.id], "INT8")}`).map((p: any) => p.id);
 	if (!served.post && !pollIds.length) {
+		if (served.avatar || served.banner) return REVALIDATE;
 		// What a profile, list, community or article shows is as open as that
 		// is (its URL may later be attached to private content, so it is
 		// revalidated): a private list's banner only to its owner, an article's
@@ -654,8 +657,7 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 		// alone: ids are snowflakes, not secrets.
 		const path = `/media/${served.id}`;
 		const [shown] = await sql`select 1 where
-			exists (select 1 from users where id = ${served.owner}::bigint and (avatar_url = ${path} or banner_url = ${`/media/banner/${served.id}`}))
-			or exists (select 1 from lists l where l.banner_media_id = ${served.id}::bigint
+			exists (select 1 from lists l where l.banner_media_id = ${served.id}::bigint
 				and (l.owner_id = ${viewer.id}::bigint or (not l.is_private and l.owner_id not in ${blockedFor(viewer.id)})))
 			or exists (select 1 from communities where banner_url = ${path})
 			or exists (select 1 from articles a join posts post on post.article_id = a.id
@@ -699,9 +701,20 @@ function tagOf(served: Served, body: Blob, cache: string): { etag?: string } {
 }
 const unchanged = (req: Request, headers: Record<string, string>) => !!headers.etag && req.headers.get("if-none-match") === headers.etag;
 
-// /media/<id>[.ext], /media/banner/<id>[/<size>] and /media/poster/<id>.jpg; the
-// client asks for sizes through the query string or a path suffix, and gets the
-// original either way. Byte ranges are answered so the video player can seek.
+const AVATAR_SIDES = new Map([["mini", 24], ["normal", 48], ["bigger", 73], ["200x200", 200], ["400x400", 400]]);
+const BANNER_WIDTHS = new Map([["300x100", 300], ["600x200", 600], ["1080x360", 1080], ["1500x500", 1500]]);
+
+function profileSize(served: Served, bannerPath: boolean, extension: string | undefined, size: string | null): [number, number] | undefined {
+	if (bannerPath && served.banner) {
+		const width = size ? BANNER_WIDTHS.get(size) : 1500;
+		if (width) return [width, width / 3];
+	}
+	if (!bannerPath && !extension && served.avatar) {
+		const side = size ? AVATAR_SIDES.get(size) : 400;
+		if (side) return [side, side];
+	}
+}
+
 export async function serveMedia(req: Request, pathname: string, viewer: Viewer): Promise<Response> {
 	const cardVideo = /^\/media\/card-video\/(\d{1,19})\.xml$/.exec(pathname);
 	const poster = /^\/media\/poster\/(\d{1,19})\.jpg$/.exec(pathname);
@@ -715,13 +728,17 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 		if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 		return new Response(body, { headers });
 	}
-	const m = /^\/media\/(?:banner\/)?(\d{1,19})(?:\.[a-z0-9]+)?(?:\/[\w-]+)?$/.exec(pathname);
-	const body = m && isId(m[1]) && (await remoteMediaFile(m[1]));
-	if (!m || !body) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const served = await servedOf(m[1]);
+	const m = /^\/media\/(banner\/)?(\d{1,19})(?:\.([a-z0-9]+))?(?:\/([\w-]+))?$/.exec(pathname);
+	const source = m && isId(m[2]) && (await remoteMediaFile(m[2]));
+	if (!m || !source) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	const served = await servedOf(m[2]);
 	const cache = served && (await cacheFor(viewer, served));
 	if (!served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const headers: Record<string, string> = { "content-type": servedType(served.mime), "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, "accept-ranges": "bytes", ...tagOf(served, body, cache) };
+	const dimensions = profileSize(served, !!m[1], m[3], m[4] ?? new URL(req.url).searchParams.get("name"));
+	const variant = dimensions && await profileVariant(served.id, source, served.mime, ...dimensions);
+	const body = variant?.body ?? source;
+	const tag = variant ? (cache === REVALIDATE ? { etag: variant.etag } : {}) : tagOf(served, body, cache);
+	const headers: Record<string, string> = { "content-type": servedType(variant?.mime ?? served.mime), "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, "accept-ranges": "bytes", ...tag };
 	if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 	const size = body.size;
 	const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");

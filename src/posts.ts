@@ -13,7 +13,8 @@ import { blockedFor, federatedHiddenFor, hasMutedWord, isBlockedEitherWay, muted
 import { staffViewer } from "./staff-access";
 import { fetchPreview, linkCard, linksIn, previewable, previewsFor, statusLinkOf } from "./links";
 import { paymentCards, rewardLike } from "./money";
-import { mediaForPosts } from "./media";
+import { type MediaRow, mediaForPosts } from "./media";
+import { momentCardsFor, momentLinkId } from "./moments";
 import { communityObjects } from "./community-model";
 import { webSource } from "./platforms";
 import { pollCard, pollsByIds } from "./polls";
@@ -51,11 +52,21 @@ const select = (viewerId: string) => sql`
 		exists (select 1 from reposts x where x.post_id = p.id and x.user_id = ${viewerId}::bigint) as reposted,
 		exists (select 1 from bookmarks x where x.post_id = p.id and x.user_id = ${viewerId}::bigint) as bookmarked
 	from posts p
-	join users u on u.id = p.user_id and (not p.hidden or ${staffViewer(viewerId)}) and ${circleSeen(viewerId)}
-		and u.id not in ${protectedFor(viewerId)} and u.id not in ${suspendedFor(viewerId)}
-		and u.id not in (select blocker_id from blocks where blocked_id = ${viewerId}::bigint)
+	join users u on u.id = p.user_id and ${visiblePost(viewerId)}
 	left join posts rp on rp.id = p.reply_to_id
 	left join users ru on ru.id = coalesce(rp.user_id, p.reply_to_user_id)`;
+
+const visiblePost = (viewerId: string) => sql`
+	(not p.hidden or ${staffViewer(viewerId)}) and ${circleSeen(viewerId)}
+	and u.id not in ${protectedFor(viewerId)} and u.id not in ${suspendedFor(viewerId)}
+	and u.id not in (select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
+
+export async function visiblePostMedia(viewerId: string, ids: string[]) {
+	if (!ids.length) return new Map<string, MediaRow[]>();
+	const rows = await sql`select p.id::text from posts p join users u on u.id = p.user_id
+		where p.id = any(${sql.array(ids, "INT8")}) and ${visiblePost(viewerId)}`;
+	return mediaForPosts(rows.map((row: { id: string }) => row.id));
+}
 
 function toRow(r: any): PostRow {
 	return {
@@ -171,11 +182,22 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 			if (quotes && !l.post.quote_id && !l.post.poll && !l.post.conversationCard && !l.post.article_id && !l.post.media?.length && target.id !== l.post.id) l.post.quoted = target;
 		}
 	}
-	const linkOf = (p: PostRow) => (p.poll || p.conversationCard || p.quote_id || p.quoted || p.article_id || p.media?.length ? undefined : linksIn(p.text).filter((l) => previewable(l.url)).at(-1)?.url);
-	const previews = await previewsFor(posts.map(linkOf).filter((u): u is string => !!u));
-	for (const p of posts) {
-		const preview = previews.get(linkOf(p) ?? "");
-		if (preview) p.linkCard = linkCard(preview);
+	const cardLinks = posts.flatMap((p) => {
+		if (p.poll || p.conversationCard || p.quote_id || p.quoted || p.article_id || p.media?.length) return [];
+		const links = linksIn(p.text).map(({ url }) => ({ url, moment: momentLinkId(url) }));
+		return links.length ? [{ post: p, links }] : [];
+	});
+	const momentIds = [...new Set(cardLinks.flatMap(({ links }) => links.flatMap(({ moment }) => moment ? [moment] : [])))];
+	const moments = await momentCardsFor(viewerId, momentIds);
+	const candidates = cardLinks.flatMap(({ post, links }) => {
+		const link = links.findLast(({ url, moment }) => (moment && moments.has(moment)) || previewable(url));
+		return link ? [{ post, ...link }] : [];
+	});
+	const previews = await previewsFor(candidates.filter(({ moment }) => !moment).map(({ url }) => url));
+	for (const { post, url, moment } of candidates) {
+		const preview = previews.get(url);
+		if (moment) post.linkCard = moments.get(moment);
+		else if (preview) post.linkCard = linkCard(preview);
 	}
 	// a payment's link put in by one of its sides, or a request's by its
 	// requester, becomes its card (money.ts)

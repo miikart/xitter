@@ -8,7 +8,9 @@ import { newId } from "../src/ids";
 import { createToken, publicApi } from "../src/public-api";
 import { applyUser } from "../src/federation-sync";
 import { PUBLIC_ORIGIN } from "../src/config";
-import { isOrganizationSql } from "../src/users";
+import { isOrganizationSql, userById } from "../src/users";
+import { legacyUser, userResult, withClassicVerification, withEggs } from "../src/model";
+import { restUser } from "../src/rest-timeline";
 import { menuLinks } from "../src/tidy";
 
 const database = new URL(process.env.DATABASE_URL ?? "postgres://localhost/xitter");
@@ -93,6 +95,14 @@ try {
 		[p.affiliations, p.badges, p.parody_label, p.label, p.automated_by, p.verified, p.verified_since, p.organization],
 		[[], [], null, null, null, false, null, false],
 	);
+
+	await sql`update users set verified_type = 'government_individual' where id = ${ids.plain}::bigint`;
+	const official = (await userById(viewer, ids.plain))!;
+	const restProfile = () => [legacyUser(official).verified, restUser(userResult(official)).verified];
+	assert.deepEqual(withClassicVerification(true, restProfile), [true, true]);
+	assert.deepEqual(withEggs("TwitterAndroid/6.17.0", restProfile), [true, true]);
+	assert.deepEqual(restProfile(), [false, false]);
+	assert.equal(legacyUser(official).verified_type, "Government");
 
 	// the same shape on post authors
 	const post = newId();

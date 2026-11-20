@@ -19,7 +19,7 @@ import { byEmail, passwordStep } from "./password-sign-in";
 import { sql } from "./db";
 import { type Message, encode, mapStrings, nameId } from "./jetfuel";
 import { fromJson } from "./jetfuel-json";
-import { CODE_DIGITS, SignupError, checkSignup, normalizeCode, signUp, usernameProblem, usernameState } from "./invites";
+import { CODE_DIGITS, SignupError, checkSignup, signUp, usernameProblem, usernameState, validInviteCode } from "./invites";
 import { requestReset } from "./password-reset";
 import { platformSource } from "./platforms";
 import { mailEnabled } from "./mail";
@@ -237,14 +237,6 @@ function fieldError(field: string, text: string): Message[] {
 	];
 }
 
-// the code, normalised, if it can still be used
-async function validCode(raw: string): Promise<string | undefined> {
-	const code = normalizeCode(raw);
-	const [ok] = await sql`select 1 from invites where code = ${code} and not revoked and uses < max_uses and (expires_at is null or expires_at > now())
-		and not exists (select 1 from users c where c.id = invites.created_by and c.status = 'suspended' and c.deactivated_at is null)`;
-	return ok ? code : undefined;
-}
-
 const signInScreen = (username = "") => fill(templates.password, { username, session_token: crypto.randomUUID() });
 
 export async function onboarding(req: Request, path: string): Promise<Response | undefined> {
@@ -271,7 +263,7 @@ export async function onboarding(req: Request, path: string): Promise<Response |
 		const token = crypto.randomUUID();
 		// came by an invite link (server.ts keeps its code in a cookie)
 		const linked = /(?:^|;\s*)xitter_invite=([^;]+)/.exec(req.headers.get("cookie") ?? "")?.[1];
-		const code = linked && (await validCode(decodeURIComponent(linked)));
+		const code = linked && (await validInviteCode(decodeURIComponent(linked)));
 		await sql`insert into signup_sessions (token, username, code) values (${token}::uuid, ${name}, ${code || ""})`;
 		return respond(mode === "open" || code ? setupScreen(token, name) : fill(templates.code, { session_token: token }));
 	}
@@ -311,7 +303,7 @@ export async function onboarding(req: Request, path: string): Promise<Response |
 			headers.append("set-cookie", "xitter_invite=; Path=/; Max-Age=0");
 			return respond(fill(templates.success, { user_id: userId, username: p.screenName }), false, headers);
 		}
-		const code = await validCode(String(f.code ?? ""));
+		const code = await validInviteCode(String(f.code ?? ""));
 		if (!code) return respond(fieldError("code", "That invite code is not valid or has been used up."));
 		await sql`update signup_sessions set code = ${code} where token = ${token}::uuid`;
 		return respond(setupScreen(token, s.username));

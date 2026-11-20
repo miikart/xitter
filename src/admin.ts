@@ -18,7 +18,7 @@ import { sql } from "./db";
 import { isOrganizationSql } from "./users";
 import { flagValue, unknownFlag } from "./flags";
 import { isId, newId } from "./ids";
-import { createInvite, staffHandleProblem } from "./invites";
+import { createInvite, staffHandleProblem, usernameProblem } from "./invites";
 import { forgetHeld, handleHeld, retireAccount } from "./held";
 import { activeStrikes, shutOut } from "./moderation";
 import { REASONS } from "./reports";
@@ -623,7 +623,8 @@ const ACTIONS: Record<string, Action> = {
 		run: async (a, b) => {
 			const screenName = String(b.screen_name ?? "").trim().replace(/^@/, "");
 			const name = String(b.name ?? "").trim() || screenName;
-			if (!/^[A-Za-z0-9_]{4,15}$/.test(screenName)) throw new AdminError("Handles are 4 to 15 letters, digits or underscores.");
+			const problem = usernameProblem(screenName);
+			if (problem) throw new AdminError(problem);
 			if (superadminNameHere(screenName)) throw new AdminError("That handle is reserved.");
 			if (await handleHeld(screenName)) throw new AdminError("That handle looks too much like another account's.");
 			const [taken] = await sql`select 1 from users where lower(screen_name) = lower(${screenName})`;
@@ -975,7 +976,7 @@ for (const [key, p] of Object.entries(PERMISSIONS))
 		if (ACTIONS[name]?.role !== p.role) throw new Error(`Staff permission ${key}: ${name} ${ACTIONS[name] ? `needs ${ACTIONS[name].role}, not ${p.role}` : "is no action"}.`);
 
 const READS = new Set(
-	"federation platforms mail cards topics me staffPermissions stats users user orgs affiliates posts reports invites settings audit badges labels staffNotes staffMessages appeals handleHistory userSessions blockedNameAccounts articles media mediaAccount operations heldIdentities updateStatus health security backups archiveImports client checkClient errors inviteTree featureSwitches hashflags oauthApps stickers automodScan money".split(
+	"federation platforms mail cards topics me staffPermissions stats users user orgs affiliates posts reports invites settings audit badges labels staffNotes staffMessages appeals handleHistory userSessions blockedNameAccounts articles media mediaAccount operations heldIdentities updateStatus health security backups archiveImports client checkClient archiveCaptures errors inviteTree featureSwitches hashflags oauthApps stickers automodScan money".split(
 		" ",
 	),
 );

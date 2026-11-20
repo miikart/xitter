@@ -1,4 +1,4 @@
-import { withEggs } from "./model";
+import { withClassicVerification, withEggs } from "./model";
 import { mediaToken, mediaTokenUser } from "./media-token";
 import { MULTI_COOKIE, SESSION_COOKIE, type Viewer, viewerById, clearedCookies, expireSessions, getViewer, logout, parseCookies, csrfCookie, signedByOAuth1 } from "./auth";
 import { clientPathAllowed, getClientFile, getClientFilePath, hasClientFile } from "./client-cache";
@@ -7,7 +7,7 @@ import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
 import { brandingFile } from "./branding";
 import { suspendedBanner } from "./login";
-import { loginForm, loginPage, maintenancePage, rulesPage, signupPage } from "./login";
+import { loginForm, loginPage, maintenancePage, rulesPage, signupRoute } from "./login";
 import { adminApi, audit } from "./admin";
 import { loadSettings, settings } from "./settings";
 import { flagPickerData } from "./flag-picker";
@@ -24,7 +24,7 @@ import { menuLinks } from "./tidy";
 import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { sweepChatUploads } from "./chat-media";
-import { loadBuild } from "./build";
+import { loadBuild, momentMakerBuild } from "./build";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
@@ -82,6 +82,7 @@ import { cardsApi, payMeApi, recentApi } from "./money";
 import { merchantRoute, moneyRoute } from "./money-page";
 import { expireShopCheckmarks } from "./money-shop";
 import { restrictedPage, restrictedRefuses } from "./restricted-page";
+import { clientHandlesMomentViewer, getMoment, momentEditRoute, momentViewRoute } from "./moments";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -304,7 +305,9 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	} else if (path === "/live_pipeline/events") {
 		return livePipeline();
 	}
-	const rest = await withEggs(req.headers.get("user-agent") ?? "", () => restRoute(req.method, path, viewer, req));
+	const ua = req.headers.get("user-agent") ?? "";
+	const classicWeb = !/^Twitter/i.test(ua) && loadBuild()?.build.featureSwitch.flat === true;
+	const rest = await withClassicVerification(classicWeb, () => withEggs(ua, () => restRoute(req.method, path, viewer, req)));
 	if (rest) return legacyIds(req, rest, viewer);
 
 	const key = `${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`;
@@ -490,7 +493,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	// they fall through to the redirect below and bounce back to "/" forever
 	if (p === "/login" && req.method === "GET") return loginPage();
 	if (p === "/i/flow/login" || p === "/i/flow/signin") return loginPage();
-	if (p === "/i/flow/signup") return signupPage();
+	if (p === "/signup" || p === "/i/flow/signup") {
+		if (req.method !== "GET" && req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+		if (req.method === "POST" && req.headers.has("origin") && req.headers.get("origin") !== PUBLIC_ORIGIN && req.headers.get("origin") !== url.origin)
+			return new Response("This request came from another site.", { status: 403 });
+		return signupRoute(req, url);
+	}
 	if (p === "/rules" || p === "/tos" || p === "/privacy") return rulesPage();
 	// X's sign-in screens (jf.x.com), answered here
 	// inside the signed-in client the same screens come through /i/jfapi
@@ -507,8 +515,6 @@ async function route(req: Request): Promise<Response | undefined> {
 		const screen = await onboarding(req, p.replace(/^\/i\/jfapi/, ""));
 		if (screen) return screen;
 	}
-	// people sign in and up on the signed-out home page; an invite link's code
-	// is kept for the dialog, which then skips asking for it
 	// X's own add-email flow: ours is a page
 	if (p === "/i/flow/add_email") return Response.redirect("/settings/xitter/email", 302);
 	// and X's automated-account flow (automation.ts)
@@ -517,12 +523,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p) && !p.startsWith("/settings/xitter/")) return Response.redirect("/settings/xitter/passkeys", 302);
 	// the built-in "All" list (lists.ts)
 	if (p === "/all") return Response.redirect("/i/lists/1", 302);
-	if (p === "/login" || p === "/signup" || p.startsWith("/i/flow/")) {
-		const headers = new Headers({ location: "/" });
-		const code = url.searchParams.get("code");
-		if (code) headers.append("set-cookie", `xitter_invite=${encodeURIComponent(code)}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly`);
-		return new Response(null, { status: 302, headers });
-	}
+	if (p === "/login" || p.startsWith("/i/flow/")) return Response.redirect("/", 302);
 	if (p === "/__uitest") return new Response(`<!doctype html><script>document.cookie="auth_token=uitok; path=/; SameSite=Lax";document.cookie="ct0=uicsrf; path=/; SameSite=Lax";location.replace("/home");</script>`, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 	if (p.startsWith("/public/") && !p.startsWith("/public/steam/")) return servePublic(p);
 	// the favicon and manifest depend on the account (the client's own brand for members)
@@ -600,6 +601,21 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/migrate" && viewer) return migrateRoute(req, viewer);
 	if ((p === "/account/money" || p.startsWith("/account/money/")) && viewer) return moneyRoute(req, viewer);
 	if (p === "/account/merchant" && viewer) return merchantRoute(req, viewer);
+	const momentEdit = /^\/i\/moments\/edit\/(\d{1,19})\/?$/.exec(p);
+	if (momentEdit && viewer) {
+		if (req.method === "GET" && url.searchParams.get("fallback") !== "1" && url.searchParams.get("state") !== "1" && momentMakerBuild()) {
+			return Response.redirect(`/i/moment_maker/edit/${momentEdit[1]}`, 302);
+		}
+		return momentEditRoute(req, url, viewer, momentEdit[1]!);
+	}
+	const momentView = /^\/i\/moments\/(\d{1,19})\/?$/.exec(p);
+	if (momentView && req.method === "GET" && viewer && (!clientHandlesMomentViewer() || url.searchParams.get("view") === "native")) {
+		return momentViewRoute(req, viewer, momentView[1]!);
+	}
+	const momentEvent = /^\/i\/events\/(\d{1,19})\/?$/.exec(p);
+	if (momentEvent && req.method === "GET" && viewer && (await getMoment(viewer.id, momentEvent[1]!, false))) {
+		return Response.redirect(`/i/moments/${momentEvent[1]}`, 302);
+	}
 	if (p.startsWith("/i/ton/data/xchat_media/")) return chatMediaRoute(req, viewer, url);
 	// pictures and oEmbed for previews of public posts in other apps (embeds.ts)
 	if (p.startsWith("/embed/")) return embedImage(p);
@@ -660,13 +676,27 @@ async function route(req: Request): Promise<Response | undefined> {
 	const look = prefs.look;
 	const painted = look?.kind === "painted" ? look.theme : null;
 	const paint = viewer && painted ? await resolveBackground(viewer.id, painted) : undefined;
-	const page = shell(viewer ?? null, !!parseCookies(req)[MULTI_COOKIE], communityRows.length > 0, flagRows[0]?.education_flags ?? {}, links, look, prefs.accent, paint, viewer?.csrf);
+	const isMomentMaker = Boolean(viewer && (p === "/i/moment_maker" || p.startsWith("/i/moment_maker/")));
+	const mmBuild = isMomentMaker ? momentMakerBuild() : undefined;
+	const activeBuild = loadBuild();
+	const page = shell(
+		viewer ?? null,
+		!!parseCookies(req)[MULTI_COOKIE],
+		communityRows.length > 0,
+		flagRows[0]?.education_flags ?? {},
+		links,
+		look,
+		prefs.accent,
+		paint,
+		viewer?.csrf,
+		mmBuild ? { build: mmBuild, momentMakerHost: activeBuild?.build.sha !== mmBuild.build.sha } : undefined,
+	);
 	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": PAGE_CSP });
 	// a guest token left from the signed-out page makes the signed-in client act
 	// as a guest (no csrf header, every write refused)
 	if (viewer && /(?:^|;\s*)gt=/.test(req.headers.get("cookie") ?? "")) headers.append("set-cookie", "gt=; Path=/; Max-Age=0");
 	if (viewer && parseCookies(req).ct0 !== viewer.csrf) headers.append("set-cookie", csrfCookie(viewer.csrf));
-	for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
+	for (const c of nightModeCookies(look, (mmBuild ?? activeBuild)?.build.featureSwitch.flat)) headers.append("set-cookie", c);
 	if (!page) return new Response("no pinned client build: run scripts/fetch-client.ts --token or --har", { status: 500, headers });
 	// a suspended account sees the app with X's notice at the top of the timeline (the API refuses it)
 	if (viewer?.status === "suspended" && !viewer.role) {

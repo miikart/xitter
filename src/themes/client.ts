@@ -21,7 +21,14 @@ export const THEME_SCRIPT = String.raw`(function(){
 	var accents=${JSON.stringify(ACCENTS)};
 	var accentIds=${JSON.stringify(ACCENT_IDS)};
 	var accentWire=X.accent!=null?X.accent:(look&&look.accent!=null?look.accent:null);
-	var forcedColor=(look&&look.themeColor)||X.themeColor||"blue500";
+	var LEGACY_COLORS={blue500:"blue",yellow500:"yellow",magenta500:"red",purple500:"purple",orange500:"orange",green500:"green"};
+	function toClientColor(id){return X.legacyThemeColor?(LEGACY_COLORS[id]||"blue"):id}
+	var forcedColor=toClientColor((look&&look.themeColor)||X.themeColor||"blue500");
+	var forcedBackground=X.themeBackground;
+	function savedThemeSettings(obj){
+		return Object.assign({},obj,{themeColor:forcedColor},forcedBackground?{themeBackground:forcedBackground}:{});
+	}
+	window.__xitterSavedThemeSettings=savedThemeSettings;
 	var scopes=${JSON.stringify(LINK_SCOPES)};
 	var presets=X.themePresets||[];
 	var sheet,fontSheet,accentSheet,at=0,timer,key="",accentKey="";
@@ -102,7 +109,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 					var v=g.result;
 					if(!v||typeof v!=="object")v={local:{}};
 					if(!v.local||typeof v.local!=="object")v.local={};
-					v.local.themeColor=forcedColor;
+					v.local=savedThemeSettings(v.local);
 					store.put(v,"device:rweb.settings");
 				};
 			};
@@ -111,7 +118,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 	function applyAccentVars(){
 		var a=resolveAccent(accentWire),h=document.documentElement,hover=mix(hexRgb(a.solid),hexRgb("#0f1419"),0.12);
 		// on a decorated profile only the choice is kept, for when the theme comes back
-		if(held){resolved=a;forcedColor=a.custom?"blue500":a.id;return}
+		if(held){resolved=a;forcedColor=toClientColor(a.custom?"blue500":a.id);return}
 		h.style.setProperty("--xt-accent",a.solid);
 		h.style.setProperty("--xt-accent-fill",a.fill);
 		h.style.setProperty("--xt-accent-soft",rgba(a.solid,0.1));
@@ -120,7 +127,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 		h.style.setProperty("--xt-accent-text",(hexRgb(a.solid)[0]*299+hexRgb(a.solid)[1]*587+hexRgb(a.solid)[2]*114)/1000>160?"#0f1419":"#ffffff");
 		h.setAttribute("data-xitter-accent",a.custom?"custom":a.id);
 		resolved=a;
-		forcedColor=a.custom?"blue500":a.id;
+		forcedColor=toClientColor(a.custom?"blue500":a.id);
 	}
 	function rgbKey(s){
 		var m=/rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(s||"");
@@ -273,7 +280,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 		document.cookie="night_mode="+v+"; ${NIGHT_MODE_ATTR}";
 	}
 	function nudge(){
-		if(!look)return;
+		if(!look||(X.legacyThemeColor&&!forcedBackground))return;
 		var digit=String(look.night);
 		if((document.cookie.match(/(?:^|;\s*)night_mode=(\d)/)||[])[1]===digit)return;
 		setNight(digit);
@@ -547,6 +554,17 @@ export const THEME_SCRIPT = String.raw`(function(){
 			.then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d}})})
 			.then(function(x){if(then)then(x.ok,x.d)},function(){});
 	}
+	function saveMode(mode){
+		post({mode:mode},function(ok){
+			if(!ok)return;
+			forcedBackground=mode==="light"?"light":"darker";
+			setNight(mode==="light"?"0":X.legacyThemeColor?"1":"2");
+			apply(null);
+			mark();
+		});
+	}
+	window.__xitterSaveLegacyNight=function(digit){saveMode(digit==="1"?"dark":"light")};
+	function isDisplay(){return /^\/(?:settings|i)\/display\/?$/.test(location.pathname)}
 	function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text)e.textContent=text;return e}
 	function chipBg(g){return g&&g.stops?fill(g):"#15202b"}
 	var wired=false,picking=false;
@@ -632,7 +650,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 			document.body.appendChild(inp);
 			inp.addEventListener("input",function(){
 				if(!inp.value)return;
-				forcedColor="blue500";
+				forcedColor=toClientColor("blue500");
 				accentWire=inp.value;
 				applyAccentVars();
 				paintAccent();
@@ -653,7 +671,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 		inp.click();
 	}
 	function colors(){
-		if(location.pathname.indexOf("/settings/display")!==0)return;
+		if(!isDisplay())return;
 		var group=document.querySelector('[role="radiogroup"][aria-label="Color options"]');
 		if(!group)return;
 		var kids=[].filter.call(group.children,function(n){return n.getAttribute("data-xitter-color")!=="custom"&&n.querySelector('[role="radio"],input[type="radio"]')});
@@ -665,7 +683,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 			card.setAttribute("data-xitter-color",id);
 			card.addEventListener("click",function(){
 				if(picking)return;
-				forcedColor=id;
+				forcedColor=toClientColor(id);
 				accentWire=id;
 				post({accent:id},function(ok,d){
 					if(ok&&d&&d.accent!=null)accentWire=d.accent;
@@ -699,7 +717,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 					var blue=group.querySelector('[data-xitter-color="blue500"]');
 					try{if(blue)blue.click()}catch(err){}
 					picking=false;
-					forcedColor="blue500";
+					forcedColor=toClientColor("blue500");
 					openCustom(group);
 				},true);
 				group.appendChild(custom);
@@ -708,38 +726,45 @@ export const THEME_SCRIPT = String.raw`(function(){
 		markColors(group);
 	}
 	function display(){
-		if(location.pathname.indexOf("/settings/display")!==0)return;
+		if(!isDisplay())return;
 		colors();
 		if(document.querySelector("[data-xitter-dim]")){mark();return}
 		var group=document.querySelector('[role="radiogroup"][aria-label="Background options"]');
 		if(!group)return;
-		var defCard,lightsCard,i;
+		var defCard,lightsCard,nativeDim,i;
 		for(i=0;i<group.children.length;i++){
-			var card=group.children[i],lab=card.querySelector("span"),tx=lab&&lab.textContent;
+			var card=group.children[i],tx=card.textContent.trim();
 			if(tx==="Default")defCard=card;
 			if(tx==="Lights out")lightsCard=card;
+			if(tx==="Dim")nativeDim=card;
 		}
 		if(!defCard||!lightsCard)return;
 		defCard.setAttribute("data-xitter-native","default");
 		lightsCard.setAttribute("data-xitter-native","lights");
-		var dim=lightsCard.cloneNode(true);
+		var dim=nativeDim||lightsCard.cloneNode(true);
 		dim.setAttribute("data-xitter-dim","");
-		dim.removeAttribute("data-xitter-native");
-		dim.querySelectorAll("span").forEach(function(s){if(!s.childElementCount&&s.textContent==="Lights out")s.textContent="Dim"});
-		dim.style.backgroundColor="#15202B";
-		var inp=dim.querySelector("input");
-		if(inp){inp.removeAttribute("name");inp.setAttribute("aria-label","Dim");inp.checked=false}
-		unselectCard(dim);
-		group.insertBefore(dim,lightsCard);
+		if(!nativeDim){
+			dim.removeAttribute("data-xitter-native");
+			dim.querySelectorAll("span").forEach(function(s){if(!s.childElementCount&&s.textContent==="Lights out")s.textContent="Dim"});
+			dim.style.backgroundColor="#15202B";
+			var inp=dim.querySelector("input");
+			if(inp){inp.removeAttribute("name");inp.setAttribute("aria-label","Dim");inp.checked=false}
+			unselectCard(dim);
+			group.insertBefore(dim,lightsCard);
+		}
 		function onMode(mode){
 			return function(){
 				if(picking)return;
-				post({mode:mode},function(){apply(null);mark()});
+				saveMode(mode);
 			};
 		}
 		defCard.addEventListener("click",onMode("light"),true);
 		lightsCard.addEventListener("click",onMode("dark"),true);
 		dim.addEventListener("click",function(e){
+			if(nativeDim){
+				post({theme:{id:"dim"}},function(ok){if(ok)location.reload()});
+				return;
+			}
 			e.preventDefault();e.stopPropagation();
 			picking=true;
 			var lightsInp=lightsCard.querySelector("input");
