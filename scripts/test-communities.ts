@@ -49,6 +49,9 @@ check("a duplicate name is refused", !!dup.errors?.length);
 
 const asB = (await b.get("CommunityByRestId", { communityId: id })).data.communityResults.result;
 check("a stranger sees it as NonMember with a join action", asB.role === "NonMember" && asB.actions.join_action_result.__typename === "CommunityJoinAction");
+const primary = (await b.get("PrimaryContentQuery", { communityId: id })).data?.community;
+check("June 2022 can open the community with a legacy facepile", primary?.id_str === id && !!primary.members_facepile_results?.[0]?.result?.legacy?.screen_name);
+check("June 2022 hides join requests from non-members", primary?.join_requests_result?.__typename === "CommunityJoinRequestsUnavailable");
 
 // posting
 const stranger = await b.gql("CreateTweet", { tweet_text: "not a member", semantic_annotation_ids: annotation(id) });
@@ -128,6 +131,7 @@ check("delete", deleted.data?.community_delete?.__typename === "CommunityDeleteS
 made.pop();
 const gone = (await a.get("CommunityByRestId", { communityId: id })).data.communityResults.result;
 check("deleted community is unavailable", gone.__typename === "CommunityUnavailable");
+check("June 2022 gets a null community after deletion", (await a.get("PrimaryContentQuery", { communityId: id })).data?.community === null);
 
 for (const m of made) await a.gql("DeleteCommunityMutation", { id: m, name: "x" });
 for (const p of [inPost.rest_id, memberPost.data?.create_tweet?.tweet_results?.result?.rest_id].filter(Boolean)) {

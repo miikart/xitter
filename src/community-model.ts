@@ -21,8 +21,16 @@ const globalId = (kind: string, id: string) => Buffer.from(`${kind}:${id}`).toSt
 export const communityGlobalId = (id: string) => globalId("Community", id);
 
 const BANNER = {
-	media_info: { __typename: "ApiImage", original_img_url: "/public/list-banner.svg", original_img_width: 1500, original_img_height: 500 },
+	media_info: {
+		__typename: "ApiImage",
+		original_img_url: "/public/list-banner.svg",
+		original_img_width: 1500,
+		original_img_height: 500,
+		color_info: { palette: [{ percentage: 100, rgb: { red: 83, green: 100, blue: 113 } }] },
+	},
 };
+
+const UNAVAILABLE_USER = { __typename: "UserUnavailable", reason: "Unavailable", unavailable_reason: "Unavailable", message: "This account is unavailable." };
 
 type CommunityRow = {
 	id: string;
@@ -41,6 +49,7 @@ type CommunityRow = {
 	created_at: Date;
 	member_count: number;
 	moderator_count: number;
+	pending_join_request_count: number;
 	role: Role;
 	requested: boolean;
 };
@@ -56,6 +65,7 @@ export async function communityRows(viewerId: string, ids: string[]): Promise<Ma
 			c.topic_id::text as topic_id, (select t.name from topics t where t.id = c.topic_id) as topic_name,
 			(select count(*)::int from community_members m where m.community_id = c.id) as member_count,
 			(select count(*)::int from community_members m where m.community_id = c.id and m.role in ('Moderator', 'Admin')) as moderator_count,
+			(select count(*)::int from community_join_requests r where r.community_id = c.id) as pending_join_request_count,
 			coalesce((select m.role from community_members m where m.community_id = c.id and m.user_id = ${viewerId}::bigint), 'NonMember') as role,
 			exists (select 1 from community_join_requests r where r.community_id = c.id and r.user_id = ${viewerId}::bigint) as requested
 		from communities c where c.id = any(${sql.array(ids, "INT8")})`;
@@ -101,7 +111,7 @@ export async function communityObjects(viewerId: string, ids: string[]): Promise
 	const out = new Map<string, Record<string, unknown>>();
 	for (const [id, r] of rows) {
 		const creator = users.get(r.creator_id);
-		const creatorResults = creator ? { result: userResult(creator) } : undefined;
+		const creatorResults = { result: creator ? userResult(creator) : UNAVAILABLE_USER };
 		const faces = faceRows.filter((f: any) => f.community_id === id).flatMap((f: any) => (users.has(f.user_id) ? [{ result: userResult(users.get(f.user_id)!) }] : []));
 		const banner = r.banner_url
 			? {
@@ -129,9 +139,12 @@ export async function communityObjects(viewerId: string, ids: string[]): Promise
 			question: r.question || null,
 			search_tags: [],
 			is_nsfw: r.is_nsfw,
+			default_theme: "Default",
+			custom_theme: null,
 			primary_community_topic: r.topic_id && r.topic_name ? { __typename: "CommunityTopicPair", topic_id: r.topic_id, topic_name: r.topic_name } : null,
 			actions: actions(r),
-			...(creatorResults ? { admin_results: creatorResults, creator_results: creatorResults } : {}),
+			admin_results: creatorResults,
+			creator_results: creatorResults,
 			invites_result: { __typename: "CommunityInvitesUnavailable", reason: "ViewerNotAllowed", message: "Invites aren't available here." },
 			join_policy: r.join_policy,
 			invites_policy: r.invites_policy,
@@ -146,7 +159,9 @@ export async function communityObjects(viewerId: string, ids: string[]): Promise
 			custom_banner_media: banner,
 			default_banner_media: BANNER,
 			viewer_relationship: { __typename: "UserCommunityRelationship", moderation_state: { __typename: "CommunityUserNotRemovedModerationState" } },
-			...(canModerate(r.role) ? { join_requests_result: { __typename: "CommunityJoinRequests" } } : {}),
+			join_requests_result: canModerate(r.role)
+				? { __typename: "CommunityJoinRequests", id: globalId("CommunityJoinRequests", id), pending_join_request_count: r.pending_join_request_count }
+				: { __typename: "CommunityJoinRequestsUnavailable" },
 		});
 	}
 	return out;

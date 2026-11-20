@@ -59,11 +59,20 @@ async function one(viewerId: string, id: string) {
 	return obj;
 }
 
-// A community's own page: `communityResults.result.<key>` holds the data.
+// A community's own page: newer builds read `communityResults.result`, while
+// June 2022 aliases `community_by_rest_id` as `community` (nullable when gone).
 const inCommunity = async (viewerId: string, id: string, extra: Record<string, unknown>) => {
 	const base = (await communityObjects(viewerId, [id])).get(id);
-	if (!base) return { data: { communityResults: { result: { __typename: "CommunityUnavailable", reason: "NotFound", ...unavailableText("This community doesn't exist.", "It may have been deleted.") } } } };
-	return { data: { communityResults: { result: { ...base, ...extra } } } };
+	if (!base) {
+		return {
+			data: {
+				community: null,
+				communityResults: { result: { __typename: "CommunityUnavailable", reason: "NotFound", ...unavailableText("This community doesn't exist.", "It may have been deleted.") } },
+			},
+		};
+	}
+	const merged = { ...base, ...extra };
+	return { data: { community: merged, communityResults: { result: merged } } };
 };
 
 const timeline = (entries: unknown[], base: bigint, scribe = "community") => ({
@@ -113,7 +122,7 @@ const communityEntry = (community: unknown, id: string, sort: string) => ({
 	content: {
 		__typename: "TimelineTimelineItem",
 		entryType: "TimelineTimelineItem",
-		itemContent: { __typename: "TimelineCommunity", itemType: "TimelineCommunity", displayType: "Community", community_results: { result: community } },
+		itemContent: { __typename: "TimelineCommunity", itemType: "TimelineCommunity", displayType: "Community", community, community_results: { result: community } },
 	},
 });
 
@@ -164,6 +173,7 @@ async function people(viewerId: string, id: string, moderators: boolean) {
 async function joinRequests(viewerId: string, id: string) {
 	const rows = await sql`select r.user_id::text, r.answer, r.created_at from community_join_requests r where r.community_id = ${id}::bigint order by r.created_at`;
 	const users = await usersByIds(viewerId, rows.map((r: any) => r.user_id));
+	const community = { __typename: "Community", id: communityGlobalId(id), id_str: id, rest_id: id };
 	const items = rows.flatMap((r: any) =>
 		users.has(r.user_id)
 			? [
@@ -174,7 +184,11 @@ async function joinRequests(viewerId: string, id: string) {
 						created_at: new Date(r.created_at).getTime(),
 						responded_at: null,
 						state: "Pending",
-						user_relationship: { __typename: "UserCommunityRelationship", user_results: { result: userResult(users.get(r.user_id)!) } },
+						user_relationship: {
+							__typename: "UserCommunityRelationship",
+							community,
+							user_results: { result: { ...userResult(users.get(r.user_id)!), id_str: r.user_id } },
+						},
 						actions: {
 							join_request_approve_action_result: { __typename: "CommunityJoinRequestApproveAction" },
 							join_request_deny_action_result: { __typename: "CommunityJoinRequestDenyAction" },
@@ -236,11 +250,12 @@ async function requestToJoin(v: Viewer, vars: Vars) {
 	}
 	const answer = clean(vars.answer, MAX_QUESTION * 4, "The answer");
 	await sql`insert into community_join_requests (community_id, user_id, answer) values (${id}::bigint, ${v.id}::bigint, ${answer}) on conflict do nothing`;
+	const community = await one(v.id, id);
 	return {
 		data: {
 			community_join_request_create: {
 				__typename: "CommunityJoinRequest",
-				user_relationship: { community_results: { result: await one(v.id, id) } },
+				user_relationship: { community, community_results: { result: community } },
 			},
 		},
 	};
@@ -264,6 +279,7 @@ async function respond(v: Viewer, vars: Vars, approve: boolean) {
 	}
 	const users = await usersByIds(v.id, [vars.userId]);
 	const user = users.get(vars.userId);
+	const community = await one(v.id, id);
 	const result = {
 		__typename: "CommunityJoinRequest",
 		id: Buffer.from(`CommunityJoinRequest:${id}:${vars.userId}`).toString("base64"),
@@ -273,8 +289,9 @@ async function respond(v: Viewer, vars: Vars, approve: boolean) {
 		state: approve ? "Approved" : "Denied",
 		user_relationship: {
 			__typename: "UserCommunityRelationship",
-			user_results: user ? { result: userResult(user) } : undefined,
-			community_results: { result: await one(v.id, id) },
+			user_results: user ? { result: { ...userResult(user), id_str: user.id } } : undefined,
+			community,
+			community_results: { result: community },
 		},
 	};
 	return { data: { [approve ? "community_join_request_approve" : "community_join_request_deny"]: result } };
@@ -359,8 +376,10 @@ const fetchOne = async (v: Viewer, vars: Vars) => {
 	const id = communityId(vars);
 	const base = await inCommunity(v.id, id, {});
 	const result = (base.data.communityResults as any).result;
-	const obj = result.__typename === "Community" ? { ...result, is_member: result.role !== "NonMember" } : result;
-	return { data: { communityResults: { result: obj }, community_results_by_rest_id: { result: obj }, community_by_rest_id: obj } };
+	const found = result.__typename === "Community";
+	const obj = found ? { ...result, is_member: result.role !== "NonMember" } : result;
+	const legacy = found ? obj : null;
+	return { data: { community: legacy, communityResults: { result: obj }, community_results_by_rest_id: { result: obj }, community_by_rest_id: obj } };
 };
 
 // the moderator Tools screen also reads the pending request count and a spotlight action
@@ -374,6 +393,31 @@ const toolsQuery = async (v: Viewer, vars: Vars) => {
 	obj.join_requests_result = canModerate(role) ? await joinRequests(v.id, id) : { __typename: "CommunityJoinRequestsUnavailable" };
 	return r;
 };
+
+const like = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+async function searchCommunities(viewerId: string, vars: Vars) {
+	const q = typeof vars.query === "string" ? vars.query.trim() : "";
+	if (!q || vars.cursor) return { data: { communities_search_slice: { items: [], items_results: [], slice_info: { next_cursor: null, previous_cursor: null } } } };
+	const pattern = like(q);
+	const rows = await sql`select c.id::text as id from communities c
+		where (c.name ilike ${pattern} or c.description ilike ${pattern})
+			and c.creator_id not in ${blockedFor(viewerId)}
+		order by (lower(c.name) = lower(${q})) desc, (select count(*) from community_members m where m.community_id = c.id) desc, c.created_at desc limit 50`;
+	const ids = rows.map((r: any) => r.id as string);
+	const objects = await communityObjects(viewerId, ids);
+	const items = ids.flatMap((id) => (objects.has(id) ? [objects.get(id)!] : []));
+	return {
+		data: {
+			communities_search_slice: {
+				items,
+				items_results: items.map((result) => ({ result })),
+				slice_info: { next_cursor: null, previous_cursor: null },
+			},
+		},
+	};
+}
+
 export const communityHandlers = {
 	CreateCommunity: create,
 	JoinCommunity: join,
@@ -383,6 +427,11 @@ export const communityHandlers = {
 	CommunityByRestId: fetchOne,
 	CommunitiesFetchOneQuery: fetchOne,
 	CommunityQuery: fetchOne,
+	PrimaryContentQuery: fetchOne,
+	CommunityAppBarButtonQuery: fetchOne,
+	CommunityThumbnailQuery: fetchOne,
+	MemberRequestsPivotContainerQuery: fetchOne,
+	CommunityModerationData: fetchOne,
 	CommunityInviteButtonQuery: fetchOne,
 	CommunityToolsScreenContainerQuery: toolsQuery,
 	EditMembershipTypeQuery: fetchOne,
@@ -478,6 +527,7 @@ export const communityHandlers = {
 	CommunitiesMainDiscoveryModule: async (v: Viewer, vars: Vars) => ({
 		data: { communities_viewer: { community_discovery_module: await communityList(v.id, (await discoverIds(v.id)).slice(0, 5), vars) } },
 	}),
+	CommunitiesSearchQuery: (v: Viewer, vars: Vars) => searchCommunities(v.id, vars),
 	CommunitiesMembershipsTimeline: async (v: Viewer, vars: Vars) => {
 		const userId = isId(vars.userId) ? vars.userId : v.id;
 		return { data: { user: { result: { __typename: "User", timeline: await communityList(v.id, await memberIds(userId), vars) } } } };
@@ -507,10 +557,13 @@ async function topics() {
 async function memberships(v: Viewer) {
 	const ids = await memberIds(v.id);
 	const objects = await communityObjects(v.id, ids);
+	const items = ids.flatMap((id) => (objects.has(id) ? [objects.get(id)!] : []));
 	const slice = {
-		items_results: ids.flatMap((id) => (objects.has(id) ? [{ result: objects.get(id) }] : [])),
+		items,
+		items_results: items.map((result) => ({ result })),
 		slice_info: { next_cursor: null, previous_cursor: null },
 	};
 	const user = { __typename: "User", community_memberships_slice: slice };
-	return { data: { viewer: { user_results: { result: user } }, viewer_v2: { user_results: { result: user } } } };
+	const viewer = { user, user_results: { result: user }, community_memberships_recent: items };
+	return { data: { viewer, viewer_v2: viewer } };
 }

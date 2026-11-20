@@ -287,6 +287,8 @@ export function userResult(u: User) {
 		has_graduated_access: true,
 		id: globalId("User", u.id),
 		is_blue_verified: isVerified(u),
+		// 2022 clients require `User.legacy` (Relay @required THROW); newer clients ignore it
+		legacy: legacyUser(u),
 		location: { location: u.location },
 		media_permissions: { can_media_tag: true },
 		notifications_settings: { notifications_enabled: !!u.stats?.notifying },
@@ -574,7 +576,7 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 		} } : {}),
 		...(p.quoted ? { quoted_status_result: { result: tweetResult(p.quoted) } } : {}),
 		...(p.article ? { article: { article_results: { result: p.article } } } : {}),
-		...(p.community ? { community_results: { result: p.community } } : {}),
+		...(p.community ? { community: p.community, community_results: { result: p.community } } : {}),
 		...(p.conversationCard ? { xitter_conversation_card: p.conversationCard } : {}),
 		...(conversation ? { card: conversation } : p.poll ? { card: p.poll } : p.linkCard ? { card: p.linkCard } : {}),
 		...(long ? { note_tweet: { is_expandable: true, note_tweet_results: { result: {
