@@ -34,10 +34,26 @@ export const switchActions: Record<string, Action> = {
 			return {
 				sha: build?.sha ?? null,
 				switches: switchReport(build),
+				androidExperiments: settings().android_experiments,
 				hasBuildOverrides: !!build && Object.keys(build_switch_overrides[build.sha] ?? {}).length > 0,
 				hasOverrides: Object.keys(switch_overrides).length > 0 || Object.keys(build_switch_overrides).length > 0,
 			};
 		},
+	},
+	saveAndroidExperiments: {
+		role: "admin",
+		run: (a, b) => updateSwitches(async () => {
+			const values = b.experiments;
+			if (!values || typeof values !== "object" || Array.isArray(values)) throw new AdminError("Provide experiment names and their buckets.");
+			const entries = Object.entries(values);
+			const valid = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/;
+			if (entries.length > 100 || entries.some(([name, bucket]) => !valid.test(name) || typeof bucket !== "string" || !valid.test(bucket)))
+				throw new AdminError("Set up to 100 experiments. Names and buckets use letters, numbers, underscores, dots or hyphens.");
+			const experiments = values as Record<string, string>;
+			await setSetting("android_experiments", experiments);
+			await audit(a, "save_android_experiments", null, { experiments });
+			return {};
+		}),
 	},
 	resetFeatureSwitches: {
 		role: "admin",

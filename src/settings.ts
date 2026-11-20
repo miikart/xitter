@@ -126,6 +126,7 @@ const DEFAULTS = {
 	switch_overrides: {} as Record<string, unknown>,
 	// the same, for one build only (by sha); they win over switch_overrides
 	build_switch_overrides: {} as Record<string, Record<string, unknown>>,
+	android_experiments: {} as Record<string, string>,
 	member_client_builds: [] as string[],
 	// staff-permissions.ts: what moderators and support may do, where an admin
 	// changed it from the defaults (Admin > Staff permissions)

@@ -146,7 +146,12 @@ async function appOnlyToken(req: Request, url: URL): Promise<Response> {
 // so they answer the same to everyone. Nothing here is per account.
 function publicConfig(req: Request, p: string): Response | undefined {
 	if (req.method !== "GET") return undefined;
-	if (p === "/i/config" || p === "/1.1/help/settings.json" || p === "/1.1/help/configuration.json") return Response.json({}, { headers: { "cache-control": "no-store" } });
+	const headers = { "cache-control": "no-store" };
+	if (p === "/1.1/help/settings.json" && /^TwitterAndroid\/6\.17\.0\b/i.test(req.headers.get("user-agent") ?? "")) {
+		const config = Object.fromEntries(Object.entries(settings().android_experiments).map(([name, bucket]) => [name, { value: bucket }]));
+		return Response.json({ config, impressions: [], embedded_darkmoded: [] }, { headers });
+	}
+	if (p === "/i/config" || p === "/1.1/help/settings.json" || p === "/1.1/help/configuration.json") return Response.json({}, { headers });
 	return undefined;
 }
 

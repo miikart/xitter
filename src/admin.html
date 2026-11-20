@@ -1266,13 +1266,22 @@ const RENDER = {
 	async switches(main) {
 		const { builds, sha: serving } = await api("client").then((c) => ({ builds: c.builds || [], sha: c.sha }));
 		if (!builds.some((b) => b.id === switchBuild)) switchBuild = (builds.find((b) => b.sha === serving) || builds[0] || {}).id || "";
-		const { switches, hasOverrides, hasBuildOverrides } = await api("featureSwitches", switchBuild ? { build: switchBuild } : {});
+		const { switches, hasOverrides, hasBuildOverrides, androidExperiments } = await api("featureSwitches", switchBuild ? { build: switchBuild } : {});
 		let scope = switchBuild ? switchScope : "all";
 		// the value in force for the build being looked at, and where it comes from
 		const eff = (s) => scope === "build" && "buildOverride" in s ? { v: s.buildOverride, from: "this build" } : "override" in s ? { v: s.override, from: scope === "build" ? "all builds" : "admin" } : "xitter" in s ? { v: s.xitter, from: "Xitter" } : { v: s.build, from: "build" };
 		const show = (v) => v === undefined ? "unset" : typeof v === "string" ? v : JSON.stringify(v);
 		const scoped = () => scope === "build" ? { build: switchBuild } : {};
+		const selfRetweet = "android_self_qt_rt_4499";
+		const extraExperiments = Object.entries(androidExperiments).filter(([name]) => name !== selfRetweet).sort(([a], [b]) => a.localeCompare(b));
 		main.innerHTML = "<h1>Feature switches</h1>" +
+			'<form class="box" id="androidExperiments"><h2>Android experiments</h2>' +
+			'<p class="dim small">These assignments apply to Twitter Android 6.17.0 when the app next fetches its settings.</p>' +
+			'<label class="row"><input type="checkbox" id="androidSelfRetweet"' + (androidExperiments[selfRetweet] === "self_qt_rt" ? " checked" : "") + '> Allow users to retweet and quote their own tweets</label>' +
+			'<div class="field"><label for="androidExtraExperiments">Additional experiments, one name=bucket per line</label><textarea id="androidExtraExperiments" rows="3">' +
+			esc(extraExperiments.map(([name, bucket]) => name + "=" + bucket).join("\n")) + '</textarea></div>' +
+			'<button class="btn primary" type="submit">Save Android experiments</button></form>' +
+			'<h2>Web feature switches</h2>' +
 			'<p class="dim">Only switches present in the selected build are shown. Changes take effect on the next page load. An override for one build takes precedence over a shared override.</p>' +
 			'<div class="row" style="margin-bottom:8px">' +
 			(builds.length ? '<label class="small dim">Build <select id="sb">' + builds.map((b) => '<option value="' + esc(b.id) + '"' + (b.id === switchBuild ? " selected" : "") + ">" + esc(b.id) + (b.active ? " (serving)" : "") + "</option>").join("") + "</select></label>" : "") +
@@ -1281,6 +1290,21 @@ const RENDER = {
 			'<div class="row" style="margin-bottom:12px"><input id="sq" placeholder="Search ' + switches.length + ' switches, e.g. grok, poll, edit_tweet" style="flex:1;min-width:200px">' +
 			'<select id="sf"><option value="">All</option><option value="set">Set here</option><option value="Xitter">Set by Xitter</option><option value="on">On</option></select></div>' +
 			'<div id="slist"></div>';
+		$("#androidExperiments").onsubmit = (e) => {
+			e.preventDefault();
+			act(async () => {
+				const experiments = Object.create(null);
+				experiments[selfRetweet] = $("#androidSelfRetweet").checked ? "self_qt_rt" : "control";
+				for (const line of $("#androidExtraExperiments").value.split("\n").map((value) => value.trim()).filter(Boolean)) {
+					const parts = line.split("=").map((value) => value.trim());
+					if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("Enter each additional experiment as name=bucket.");
+					const [name, bucket] = parts;
+					if (Object.hasOwn(experiments, name)) throw new Error("Experiment listed twice: " + name);
+					experiments[name] = bucket;
+				}
+				await api("saveAndroidExperiments", { experiments });
+			}, "Android experiments saved");
+		};
 		const list = $("#slist");
 		const draw = () => {
 			$("#sreset").disabled = !(scope === "build" ? hasBuildOverrides : hasOverrides);

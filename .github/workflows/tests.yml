@@ -92,6 +92,7 @@ jobs:
           DB_POOL_MAX=1 bun scripts/test-conversation-scheduled.ts
           bun scripts/test-follow-pagination.ts
           bun scripts/test-mobile-profile.ts
+          bun scripts/test-android-experiments.ts
       - name: Media privacy and chunked upload regression tests
         run: |
           bun scripts/test-embed-privacy.ts
