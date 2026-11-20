@@ -622,6 +622,7 @@ const RENDER = {
 		const archiveFrom = Number(c.archiveFrom);
 		const short = (sha) => sha ? sha.slice(0, 10) : "none";
 		const builds = c.builds || [];
+		const memberBuilds = c.memberBuilds || [];
 		main.innerHTML = "<h1>Client</h1>" +
 			'<p class="dim">The X web client this instance serves is a pinned build. Updating pins the build x.com serves now (what <span class="code">bun scripts/fetch-client.ts --latest</span> does) and keeps the current one to go back to. A new build can bring requests this server doesn\'t answer yet; check the app after updating. A pin taken with --token loses its signed-in feature switches here: run it by hand to keep them.</p>' +
 			'<div class="cards"><div class="card"><span>Serving</span><b class="code">' + esc(short(c.sha)) + '</b><span class="small dim">' + ("pinned " + esc(when(c.fetchedAt))) + "</span></div>" +
@@ -635,11 +636,19 @@ const RENDER = {
 					builds.map((b) => '<tr><td class="code">' + esc(b.id) + '</td><td class="code">' + esc(short(b.sha)) + '</td><td class="small dim">' + esc(b.fetchedAt ? when(b.fetchedAt) : "unknown") + '</td><td class="small dim">' + b.scripts + '</td><td class="small dim">' + (b.legacyLogin ? "form" : "dialog") + '</td><td class="row">' + (b.active ? '<span class="small dim">serving</span>' : '<button class="btn" data-use="' + esc(b.id) + '">Use</button>') + '</td><td><a href="#switches" data-switches="' + esc(b.id) + '">Switches</a></td></tr>').join("") + "</table></div>"
 				: '<p class="dim">Nothing in the library yet. Save the build that is serving now, or copy a build.json + runtime.js pair into <span class="code">client/builds/&lt;name&gt;/</span> and reload this page.</p>') +
 			'<div class="row" style="margin-top:12px"><input id="bname" placeholder="name, e.g. 2022-11" maxlength="80" style="flex:1;min-width:200px"><button class="btn" id="bsave">Save the serving build here</button></div></div>' +
+			(builds.length ? '<div class="box" style="margin-top:24px"><h2>Member frontend choices</h2>' +
+				'<p class="dim">Choose which builds members can pick for their own account.</p><div class="row">' +
+				builds.map((b) => '<label><input type="checkbox" data-member-build value="' + esc(b.id) + '"' + (memberBuilds.includes(b.id) ? " checked" : "") + '> ' + esc(b.id) + '</label>').join("") +
+				'</div><button class="btn" id="save-member-builds">Save choices</button></div>' : "") +
 			'<div class="box" style="margin-top:24px"><h2>Internet Archive catalog</h2>' +
 			'<p class="dim">Searches a local CDX index with monthly captures of selected pages. Entries marked “Check on import” are checked when you select them.</p>' +
 			'<div class="row"><label class="small dim">From <input id="afrom" type="number" min="' + archiveFrom + '" value="' + archiveFrom + '" style="width:80px"></label><label class="small dim">to <input id="ato" type="number" min="' + archiveFrom + '" value="' + new Date().getFullYear() + '" style="width:80px"></label><label class="small dim">Site <select id="asite"><option value="">All sites</option><option>twitter.com</option><option>mobile.twitter.com</option><option>x.com</option></select></label><label class="small dim"><input id="achecked" type="checkbox"> Checked pages only</label><button class="btn" id="afind">Find captures</button></div>' +
 			'<div id="alist"></div></div>';
 		document.querySelectorAll("[data-switches]").forEach((el) => el.onclick = () => { switchBuild = el.getAttribute("data-switches"); });
+		if ($("#save-member-builds")) $("#save-member-builds").onclick = () => {
+			const ids = [...main.querySelectorAll("[data-member-build]:checked")].map((input) => input.value);
+			act(() => api("setMemberClientBuilds", { ids }), "Member frontend choices saved").then(route);
+		};
 		const find = $("#afind"), list = $("#alist");
 		find.onclick = async () => {
 			find.disabled = true;

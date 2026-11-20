@@ -17,9 +17,8 @@ const ICON = "/public/app-icon.png";
 // What a signed-in account sees under "Admin > Settings: client's own X / Twitter
 // name and logo": "twitter" for the archived builds before the rename, else "x".
 export type Brand = "x" | "twitter";
-export function originalBrand(signedIn: boolean): Brand | null {
+export function originalBrand(signedIn: boolean, build = loadBuild()?.build): Brand | null {
 	if (!signedIn || !settings().original_branding_for_members) return null;
-	const build = loadBuild()?.build;
 	return build?.featureSwitch.flat || build?.legacy_login ? "twitter" : "x";
 }
 export const BRAND_NAME: Record<Brand, string> = { x: "X", twitter: "Twitter" };

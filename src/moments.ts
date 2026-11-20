@@ -848,8 +848,7 @@ export async function momentLiveEventTimeline(viewer: Viewer, momentId: string):
 }
 
 // Whether the currently active client build includes the native 2019-2022 `bundle.Moment` chunk.
-export function clientHandlesMomentViewer(): boolean {
-	const loaded = loadBuild();
+export function clientHandlesMomentViewer(loaded = loadBuild()): boolean {
 	return Boolean(loaded?.runtime.includes('"bundle.Moment"'));
 }
 

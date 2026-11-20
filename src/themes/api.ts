@@ -1,6 +1,7 @@
 // themeApi, import/export HTTP handlers, load/save look, nightModeCookies, DB access.
 
 import type { Viewer } from "../auth";
+import { browserBuild } from "../build";
 import { prepareFonts } from "../fonts";
 import { resolveBackgroundItem, steamDefId, steamStillPath, steamVideoPath, type SteamDefId, type StoredSteam } from "../steam-items";
 import { PRESETS, accentWire, type Accent, type Theme } from "./presets";
@@ -159,7 +160,7 @@ export async function themeApi(req: Request, viewer: Viewer): Promise<Response> 
 	const saved = await commitLook(viewer.id, current, parsed.write, parsed.accent, parsed.warnings);
 	if (!saved.ok) return Response.json({ error: saved.error }, { status: 400 });
 	const headers = new Headers();
-	for (const c of nightModeCookies(saved.look)) headers.append("set-cookie", c);
+	for (const c of nightModeCookies(saved.look, browserBuild(viewer, req.headers.get("x-xitter-build"))?.build.featureSwitch.flat)) headers.append("set-cookie", c);
 	const view = lookView(saved.look, saved.accent);
 	if (parsed.write.type === "paint" || saved.warnings.length) return Response.json({ ...view, warnings: saved.warnings }, { headers });
 	return Response.json(view, { headers });

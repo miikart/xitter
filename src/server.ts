@@ -24,7 +24,8 @@ import { menuLinks } from "./tidy";
 import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { sweepChatUploads } from "./chat-media";
-import { loadBuild, momentMakerBuild } from "./build";
+import { browserBuild, momentMakerBuild } from "./build";
+import { frontendRoute } from "./client-preference";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
@@ -233,6 +234,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	// the client act as a guest and stop sending its csrf header.
 	if (!viewer && url.pathname.endsWith("/1.1/guest/activate.json")) return Response.json({ guest_token: "1" });
 	if (!viewer) return apiError(401, 32, "Could not authenticate you.");
+	const sessionViewer = viewer;
 	const source = await platformSource(req);
 	if (source === null) return apiError(401, 32, "Invalid or revoked client token.");
 	viewer = { ...viewer, postSource: source };
@@ -306,7 +308,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		return livePipeline();
 	}
 	const ua = req.headers.get("user-agent") ?? "";
-	const classicWeb = !/^Twitter/i.test(ua) && loadBuild()?.build.featureSwitch.flat === true;
+	const classicWeb = !/^Twitter/i.test(ua) && browserBuild(sessionViewer, req.headers.get("x-xitter-build"))?.build.featureSwitch.flat === true;
 	const rest = await withClassicVerification(classicWeb, () => withEggs(ua, () => restRoute(req.method, path, viewer, req)));
 	if (rest) return legacyIds(req, rest, viewer);
 
@@ -465,7 +467,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	// Chat's manifest: the pinned chat build's own, its addresses ours
 	if (p === "/xchat/embed-v1.json") {
-		const base = loadBuild()?.build.meta.xchatEmbedBuild as string | undefined;
+		const base = browserBuild(await getViewer(req), req.headers.get("x-xitter-build"))?.build.meta.xchatEmbedBuild as string | undefined;
 		const raw = base && (await getClientFile(`${new URL(base).pathname}mf-manifest.json`));
 		if (!raw) return new Response("no pinned chat build", { status: 404 });
 		return new Response(patchText(raw.toString("utf8")), { headers: { "content-type": "application/json", "cache-control": "no-cache" } });
@@ -527,9 +529,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/__uitest") return new Response(`<!doctype html><script>document.cookie="auth_token=uitok; path=/; SameSite=Lax";document.cookie="ct0=uicsrf; path=/; SameSite=Lax";location.replace("/home");</script>`, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 	if (p.startsWith("/public/") && !p.startsWith("/public/steam/")) return servePublic(p);
 	// the favicon and manifest depend on the account (the client's own brand for members)
-	if (p === "/favicon.ico") return servePublic(brandIcons(originalBrand(settings().original_branding_for_members && !!parseCookies(req)[SESSION_COOKIE] && !!(await getViewer(req).catch(() => undefined)))).icon);
 	if (p === "/sw.js") return new Response(SERVICE_WORKER, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
-	if (p === "/manifest.json") return manifest(originalBrand(settings().original_branding_for_members && !!parseCookies(req)[SESSION_COOKIE] && !!(await getViewer(req).catch(() => undefined))));
+	if (p === "/favicon.ico" || p === "/manifest.json") {
+		const member = settings().original_branding_for_members && parseCookies(req)[SESSION_COOKIE] ? await getViewer(req).catch(() => undefined) : undefined;
+		const brand = originalBrand(!!member, browserBuild(member)?.build);
+		return p === "/favicon.ico" ? servePublic(brandIcons(brand).icon) : manifest(brand);
+	}
 
 	const viewer = await getViewer(req);
 	setRequestLanguage(viewer?.language ?? undefined);
@@ -598,18 +603,19 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/organisation" && viewer) return orgRoute(req, viewer);
 	if (p === "/account/decor" && viewer) return decorRoute(req, viewer);
 	if (p === "/account/theme" && viewer) return themeRoute(req, viewer);
+	if (p === "/account/frontend" && viewer) return frontendRoute(req, viewer);
 	if (p === "/account/migrate" && viewer) return migrateRoute(req, viewer);
 	if ((p === "/account/money" || p.startsWith("/account/money/")) && viewer) return moneyRoute(req, viewer);
 	if (p === "/account/merchant" && viewer) return merchantRoute(req, viewer);
 	const momentEdit = /^\/i\/moments\/edit\/(\d{1,19})\/?$/.exec(p);
 	if (momentEdit && viewer) {
-		if (req.method === "GET" && url.searchParams.get("fallback") !== "1" && url.searchParams.get("state") !== "1" && momentMakerBuild()) {
+		if (req.method === "GET" && url.searchParams.get("fallback") !== "1" && url.searchParams.get("state") !== "1" && momentMakerBuild(browserBuild(viewer))) {
 			return Response.redirect(`/i/moment_maker/edit/${momentEdit[1]}`, 302);
 		}
 		return momentEditRoute(req, url, viewer, momentEdit[1]!);
 	}
 	const momentView = /^\/i\/moments\/(\d{1,19})\/?$/.exec(p);
-	if (momentView && req.method === "GET" && viewer && (!clientHandlesMomentViewer() || url.searchParams.get("view") === "native")) {
+	if (momentView && req.method === "GET" && viewer && (!clientHandlesMomentViewer(browserBuild(viewer)) || url.searchParams.get("view") === "native")) {
 		return momentViewRoute(req, viewer, momentView[1]!);
 	}
 	const momentEvent = /^\/i\/events\/(\d{1,19})\/?$/.exec(p);
@@ -660,7 +666,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	// an archived build (Admin > Client) signs in through X's dialog, which
 	// expects the current flow; guests get the plain form instead of its
 	// signed-out page, whose Log in button cannot complete
-	if (!viewer && p === "/" && loadBuild()?.build.legacy_login) return Response.redirect("/login", 302);
+	const activeBuild = browserBuild(viewer);
+	if (!viewer && p === "/" && activeBuild?.build.legacy_login) return Response.redirect("/login", 302);
 	// signed out: X's own home page with its sign-in form, and the dialog
 	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);
 	// maintenance: guests see the notice; ?staff=1 is the sign-in page, for staff
@@ -677,8 +684,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	const painted = look?.kind === "painted" ? look.theme : null;
 	const paint = viewer && painted ? await resolveBackground(viewer.id, painted) : undefined;
 	const isMomentMaker = Boolean(viewer && (p === "/i/moment_maker" || p.startsWith("/i/moment_maker/")));
-	const mmBuild = isMomentMaker ? momentMakerBuild() : undefined;
-	const activeBuild = loadBuild();
+	const mmBuild = isMomentMaker ? momentMakerBuild(activeBuild) : undefined;
 	const page = shell(
 		viewer ?? null,
 		!!parseCookies(req)[MULTI_COOKIE],
@@ -689,7 +695,7 @@ async function route(req: Request): Promise<Response | undefined> {
 		prefs.accent,
 		paint,
 		viewer?.csrf,
-		mmBuild ? { build: mmBuild, momentMakerHost: activeBuild?.build.sha !== mmBuild.build.sha } : undefined,
+		{ build: mmBuild ?? activeBuild, momentMakerHost: !!mmBuild && activeBuild?.build.sha !== mmBuild.build.sha },
 	);
 	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": PAGE_CSP });
 	// a guest token left from the signed-out page makes the signed-in client act
@@ -702,7 +708,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (viewer?.status === "suspended" && !viewer.role) {
 		const [row] = await sql`select status_until from users where id = ${viewer.id}::bigint`;
 		const dark = look ? (look.kind === "painted" ? look.theme.base === "dark" : look.mode === "dark") : parseCookies(req).night_mode !== "0";
-		const brand = originalBrand(true);
+		const brand = originalBrand(true, (mmBuild ?? activeBuild)?.build);
 		return new Response(page.replace("</body>", `${suspendedBanner(row?.status_until ?? null, dark, brand ? BRAND_NAME[brand] : settings().instance_name)}</body>`), { headers });
 	}
 	return new Response(page, { headers });

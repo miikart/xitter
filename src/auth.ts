@@ -80,6 +80,7 @@ export type Viewer = User & {
 	csrf: string;
 	token: string;
 	postSource?: string;
+	clientBuild?: string | null;
 	instance?: string | null;
 	superadmin?: boolean;
 	// set while a delegate acts as this account (delegation.ts): who they are
@@ -178,6 +179,7 @@ import { requestCountry } from "./login-history";
 const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, coalesce(u.shown_created_at, u.created_at) as created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
 	u.preferences->>'classic_post_details' = 'true' as classic_post_details,
+	u.preferences->>'client_build' as "clientBuild",
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
 

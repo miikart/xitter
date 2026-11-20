@@ -1,5 +1,5 @@
 import { parseCookies, type Viewer } from "./auth";
-import { loadBuild } from "./build";
+import { browserBuild, loadBuild } from "./build";
 import { readCached } from "./client-cache";
 import { sql } from "./db";
 import { settings } from "./settings";
@@ -231,7 +231,7 @@ ${body}
 	// Our own client frames them in Settings.
 	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": cache, "x-frame-options": "SAMEORIGIN", "content-security-policy": "frame-ancestors 'self'" });
 	if (referrer) headers.set("referrer-policy", referrer);
-	if (viewer) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
+	if (viewer) for (const c of nightModeCookies(look, browserBuild(viewer)?.build.featureSwitch.flat)) headers.append("set-cookie", c);
 	return new Response(html, { status, headers });
 }
 

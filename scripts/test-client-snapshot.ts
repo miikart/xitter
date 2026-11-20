@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { clientPathAllowed } from "../src/client-cache";
 import { snapshotPage } from "../src/client-snapshot";
 import { switchReport } from "../src/shell";
+import { runInNewContext } from "node:vm";
+import { BROWSER_BUILD_SCRIPT } from "../src/client-preference";
 
 const entry = "/twitter-assets/responsive-web/web/ltr/main.aabbccdd.js";
 const runtime = "/twitter-assets/responsive-web/web/ltr/runtime.11223344.js";
@@ -40,4 +42,28 @@ test("lists switches from the selected build with Xitter's defaults", () => {
 		{ name: "responsive_web_side_nav_enabled", build: false },
 		{ name: "responsive_web_unified_cards_moment_enabled", build: true, xitter: false },
 	]);
+});
+
+test("only same-origin client API requests carry the tab's build", () => {
+	const sha = "11223344";
+	const origin = "https://example.test";
+	const calls: Headers[] = [];
+	const window = {
+		__XITTER__: { buildSha: sha },
+		fetch: (_input: string | Request, init?: RequestInit) => calls.push(new Headers(init?.headers)),
+	};
+	class Xhr {
+		headers = new Headers();
+		open(_method: string, _url: string) {}
+		setRequestHeader(name: string, value: string) { this.headers.set(name, value); }
+	}
+	runInNewContext(BROWSER_BUILD_SCRIPT, { window, URL, Headers, location: { origin, href: origin + "/home" }, XMLHttpRequest: Xhr });
+	window.fetch(new Request(origin + "/2/timeline/home.json", { headers: { "x-csrf-token": "example" } }));
+	window.fetch("/abs/vendor.js");
+	window.fetch("https://other.test/2/timeline/home.json");
+	expect(calls.map((call) => call.get("x-xitter-build"))).toEqual([sha, null, null]);
+	expect(calls[0].get("x-csrf-token")).toBe("example");
+	const xhr = new Xhr();
+	xhr.open("GET", "/1.1/users/show.json");
+	expect(xhr.headers.get("x-xitter-build")).toBe(sha);
 });

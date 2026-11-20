@@ -120,6 +120,7 @@ export async function menuLinks(userId: string): Promise<MenuLink[]> {
 	links.push({ href: "/account/post-details", text: "Post details", description: "Show reposts, quotes and likes on a row of their own, as Twitter did.", icon: STATS, where: "settings" });
 	if (feature("circles")) links.push({ href: "/account/circle", text: "Circle", description: "Choose who sees the posts you send to your Circle.", icon: CIRCLE, where: "settings" });
 	links.push({ href: "/account/theme", text: "Theme", description: "Dim, a preset, or your own colours for the client.", icon: TONE, where: "settings" });
+	if (s.member_client_builds.length) links.push({ href: "/account/frontend", text: "Frontend", description: "Choose which year of the web client your account uses.", icon: CODE, viewBox: "0 -960 960 960", where: "both" });
 	if (feature("gifs") && gifProviders().length > 1) links.push({ href: "/account/gifs", text: "GIF provider", description: "Choose which provider supplies your GIF search results.", icon: GIF, viewBox: "0 -960 960 960", where: "settings" });
 	links.push({ href: "/account/decoration", text: "Avatar decoration", description: "Put cat ears or a decoration around your avatar.", icon: CAT, where: "both" });
 	links.push({ href: "/account/automation", text: "Automation", description: "Name the account that runs this one.", icon: ROBOT, where: "tabs" });
@@ -262,6 +263,7 @@ export const TIDY_SCRIPT = `(function(){
 	function full(p){for(var k in FULL)if(p===FULL[k]||p.indexOf(FULL[k]+"/")===0)return k+p.slice(FULL[k].length)}
 	function own(href){
 		var u=new URL(href,location.href);
+		if(u.pathname==="/account/frontend")return u.pathname;
 		if(full(u.pathname))return full(u.pathname)+u.search;
 		// the index (/account/) is Settings > Xitter settings, whose entry links to /settings/xitter
 		if(u.pathname==="/account/")return "/settings/xitter"+u.search;
@@ -386,7 +388,7 @@ export const TIDY_SCRIPT = `(function(){
 		a.addEventListener("click",function(e){
 			e.preventDefault();e.stopPropagation();
 			// the admin panel is a page of its own, outside the client
-			if(to==="/admin"){location.assign(to);return}
+			if(to==="/admin"||to==="/account/frontend"){location.assign(to);return}
 			// the menu shuts when its full-screen backdrop is clicked, not on a page change
 			var menu=a.closest('[role="menu"]');
 			if(menu)[].forEach.call(menu.parentNode.children,function(c){if(c!==menu&&getComputedStyle(c).position==="fixed")c.click()});
@@ -396,7 +398,10 @@ export const TIDY_SCRIPT = `(function(){
 	function copy(a,l){
 		leave(a,l.href);a.removeAttribute("data-testid");
 		var text=[l.text,l.description];
-		[].filter.call(a.querySelectorAll("span"),function(n){return !n.childElementCount&&n.textContent.trim()}).forEach(function(n,i){if(text[i])n.textContent=text[i]});
+		var leaf=function(n){return !n.childElementCount&&n.textContent.trim()};
+		var labels=[].filter.call(a.querySelectorAll("span"),leaf);
+		if(!labels.length)labels=[].filter.call(a.querySelectorAll("div"),leaf);
+		labels.forEach(function(n,i){if(text[i])n.textContent=text[i]});
 		var svg=a.querySelector("svg"),path=svg&&svg.querySelector("path");
 		if(path){[].slice.call(svg.querySelectorAll("path")).slice(1).forEach(function(p){p.remove()});path.removeAttribute("fill-rule");path.removeAttribute("clip-rule");path.setAttribute("d",l.icon);if(l.viewBox)svg.setAttribute("viewBox",l.viewBox)}
 		// the client hovers its entries from script, which the copy doesn't
@@ -412,6 +417,12 @@ export const TIDY_SCRIPT = `(function(){
 		if(!items.length)return;
 		// each entry sits alone in a row wrapper, so the copy takes the wrapper along
 		var s=document.querySelector('[role="menu"] a[href="/settings"]');
+		if(!s){
+			s=[].find.call(document.querySelectorAll('a[href="/settings"]'),function(a){
+				return a.parentNode.parentNode.querySelector('a[href="/logout"]');
+			});
+			items=items.filter(function(l){return l.href==="/account/frontend"});
+		}
 		var row=s&&s.parentNode;
 		if(!row||row.parentNode.querySelector("[data-xitter-link]"))return;
 		items.forEach(function(l){

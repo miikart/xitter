@@ -6,7 +6,7 @@
 import { existsSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { type Action, AdminError, audit, guard, idOf } from "./admin";
-import { loadBuild } from "./build";
+import { loadBuild, loadNamedBuild } from "./build";
 import { INSTANCE_ID, isPeer } from "./federation";
 import { sql } from "./db";
 import { newId } from "./ids";
@@ -800,7 +800,19 @@ export const toolActions: Record<string, Action> = {
 	},
 
 	// client-update.ts
-	client: { role: "admin", run: async () => ({ ...clientStatus(), builds: listBuilds(), archiveFrom: ARCHIVE_FIRST_YEAR }) },
+	client: { role: "admin", run: async () => ({ ...clientStatus(), builds: listBuilds(), archiveFrom: ARCHIVE_FIRST_YEAR, memberBuilds: settings().member_client_builds }) },
+	setMemberClientBuilds: {
+		role: "admin",
+		run: async (a, b) => {
+			const ids = b.ids;
+			if (!Array.isArray(ids) || ids.length > 16 || ids.some((id) => typeof id !== "string" || !loadNamedBuild(id)))
+				throw new AdminError("Choose up to 16 installed builds.");
+			const builds = [...new Set<string>(ids)];
+			await setSetting("member_client_builds", builds);
+			await audit(a, "set_member_client_builds", null, { builds });
+			return { builds };
+		},
+	},
 	checkClient: {
 		role: "admin",
 		run: async () => ({ latest: await latestSha().catch((e: Error) => { throw new AdminError(e.message); }), ...clientStatus() }),

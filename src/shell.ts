@@ -3,6 +3,7 @@
 
 import type { User } from "./auth";
 import { type Build, loadBuild } from "./build";
+import { BROWSER_BUILD_SCRIPT } from "./client-preference";
 import { feature, settings } from "./settings";
 import { postLimitFor } from "./textlen";
 import { CONVERSATION_CARD_CSS, CONVERSATION_CARD_SCRIPT } from "./conversation-card-ui";
@@ -347,7 +348,8 @@ window.addEventListener("popstate",function(){var dest=outside(location.href);if
 // signed out), so they come as a file the browser keeps instead of 130 KB
 // inside every page. Its address carries a hash of it (bootScript).
 const BOOT_SCRIPTS = (signedIn: boolean) =>
-	`${signedIn ? ERROR_SCRIPT : ""}
+	`${signedIn ? BROWSER_BUILD_SCRIPT : ""}
+${signedIn ? ERROR_SCRIPT : ""}
 ${TIDY_SCRIPT}
 ${FRESH_SCRIPT}
 ${FORGOT_SCRIPT}
@@ -391,12 +393,12 @@ export function shell(
 	opts?: { build?: { build: Build; runtime: string }; momentMakerHost?: boolean },
 ): string | undefined {
 	const theme = look?.kind === "painted" ? look.theme : null;
-	const brand = originalBrand(!!user);
-	const original = !!brand;
 	const clientTheme = theme ? themeForClient(theme) : null;
 	const loaded = opts?.build ?? loadBuild();
 	if (!loaded) return undefined;
 	const { build, runtime } = loaded;
+	const brand = originalBrand(!!user, build);
+	const original = !!brand;
 	const savedLook = clientLook(look ?? null, accent);
 	const background = look ? (modeOf(look) === "light" ? "light" : "darker") : undefined;
 	const signup = !user && settings().signup_mode !== "closed" && !settings().operations.maintenance;
@@ -432,7 +434,7 @@ ${signup ? '#xitter-signup{position:fixed;top:max(16px,env(safe-area-inset-top))
 </head><body><div id="react-root" style="height:100%;display:flex;"></div>
 ${signup ? '<a id="xitter-signup" href="/signup">Create an account</a>' : ""}
 <script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags, accent, build.sha, background))};window.__META_DATA__=${inline(meta)};</script>
-<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), classicDetail: !!user?.classic_post_details, circles: !!user && feature("circles"), tidy: tidyData(links), theme: clientTheme, look: { ...savedLook, night: build.featureSwitch.flat && savedLook.night === "2" ? "1" : savedLook.night }, accent: savedLook.accent, themeBackground: background, themeColor: clientThemeColor(accent, build.featureSwitch.flat), legacyThemeColor: !!build.featureSwitch.flat, themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
+<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), buildSha: build.sha, classicDetail: !!user?.classic_post_details, circles: !!user && feature("circles"), tidy: tidyData(links), theme: clientTheme, look: { ...savedLook, night: build.featureSwitch.flat && savedLook.night === "2" ? "1" : savedLook.night }, accent: savedLook.accent, themeBackground: background, themeColor: clientThemeColor(accent, build.featureSwitch.flat), legacyThemeColor: !!build.featureSwitch.flat, themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
 <script src="${bootFor(!!user).path}"></script>
 <script id="nonce-csp"></script>
 <script>window.__SCRIPTS_LOADED__=window.__SCRIPTS_LOADED__||{};${patchedRuntime}</script>

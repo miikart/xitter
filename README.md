@@ -347,6 +347,10 @@ selected URLs from the index, plus pages whose format has been checked.
 It contacts Wayback when you import a capture and checks that it is a usable
 responsive web app build.
 
+In Admin > Client, enable builds under **Member frontend choices** to let users
+pick a web client from their **Frontend** settings. The pin under **Serving**
+is the default for members and the build used by guests.
+
 ### Keep these private
 
 - An `auth_token` cookie is a live login to your X account. Use it only for
