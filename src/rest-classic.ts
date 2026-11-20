@@ -7,12 +7,13 @@
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { callOperation } from "./graphql";
+import { isId as isSnowflake } from "./ids";
 import { mediaUpload } from "./media";
 import { apiDate, legacyUser } from "./model";
 import { PUBLIC_ORIGIN } from "./config";
 import { PostError } from "./posts";
 import { userById, userByName } from "./users";
-import { failure, gone, pageOf, restStatus, restUser, status, statusPages, withText } from "./rest-timeline";
+import { conversationTimeline, failure, gone, pageOf, restStatus, restUser, status, statusPages, withText } from "./rest-timeline";
 import { trendScope } from "./explore-settings";
 import { cachedTrends } from "./search";
 
@@ -29,6 +30,29 @@ async function target(viewer: Viewer, q: URLSearchParams) {
 }
 
 const json = (v: unknown) => Response.json(v, { headers: { "content-type": "application/json;charset=utf-8" } });
+
+async function profileConversations(viewer: Viewer, q: URLSearchParams) {
+	const owner = await target(viewer, q);
+	const replies = q.get("include_tweet_replies");
+	const op = replies === "true" || replies === "1" ? "UserTweetsAndReplies" : "UserTweets";
+	const top = q.get("up_cursor");
+	const bottom = q.get("down_cursor");
+	if (isId(top)) q.set("since_id", top);
+	if (isId(bottom)) q.set("max_id", bottom);
+	const max = q.get("max_id");
+	const start = isSnowflake(max) ? `b${max}` : undefined;
+	const statuses = await statusPages(q, async (cursor = start) => {
+		const out: Obj = await callOperation(op, viewer, { userId: owner.id, count: 40, excludePinned: true, cursor });
+		return out.data.user.result.timeline.timeline;
+	}, true);
+	return conversationTimeline(viewer, statuses, {
+		includeReplyContext: false,
+		cursor: {
+			top: start ? undefined : statuses[0]?.id_str,
+			bottom: isId(q.get("since_id")) && !start ? undefined : statuses.at(-1)?.id_str,
+		},
+	});
+}
 
 // --- direct messages -------------------------------------------------------------
 // The chat of this server is end-to-end encrypted; the 2013 apps' messages are plain
@@ -290,6 +314,8 @@ export async function restClassicRoute(method: string, path: string, viewer: Vie
 	try {
 		if (method === "GET") {
 			switch (path) {
+				case "/1.1/timeline/user.json":
+					return await profileConversations(viewer, q);
 				case "/1.1/statuses/user_timeline.json": {
 					const u = await target(viewer, q);
 					const op = q.get("exclude_replies") === "true" ? "UserTweets" : "UserTweetsAndReplies";

@@ -355,6 +355,14 @@ export async function homeStatuses(viewer: Viewer, query: URLSearchParams): Prom
 export async function homeConversations(viewer: Viewer, query: URLSearchParams): Promise<Response> {
 	// this app asks for the page below the oldest post it has, by that post's own id
 	const list = await homeStatusList(viewer, query, true);
+	return conversationTimeline(viewer, list);
+}
+
+export async function conversationTimeline(
+	viewer: Viewer,
+	list: Obj[],
+	{ cursor, includeReplyContext = true }: { cursor?: { top?: string; bottom?: string }; includeReplyContext?: boolean } = {},
+): Promise<Response> {
 	const tweets: Obj = {};
 	const users: Obj = {};
 	const addUser = (u: Obj | undefined) => {
@@ -368,7 +376,7 @@ export async function homeConversations(viewer: Viewer, query: URLSearchParams):
 	// a reply travels with the posts it answers (up to two above it), as a conversation
 	const chains = new Map<string, Obj[]>();
 	await Promise.all(
-		list.map(async (s) => {
+		list.filter((s) => includeReplyContext && isStatusId(s.in_reply_to_status_id_str)).map(async (s) => {
 			const chain: Obj[] = [];
 			let at: Obj = s;
 			for (let i = 0; i < 2 && isStatusId(at.in_reply_to_status_id_str); i++) {
@@ -393,7 +401,7 @@ export async function homeConversations(viewer: Viewer, query: URLSearchParams):
 		const participants = [...new Set(all.map((p) => p.user_id_str))];
 		return [{ entity_id: { ids }, conversation: { context: { participants_count: participants.length, target_count: all.length, root_user_id: all[0].user_id_str, target_tweet_id: s.id_str, participant_ids: participants }, ids } }];
 	});
-	const body = `{"twitter_objects":${numericIds(JSON.stringify({ tweets, users }))},"response":${JSON.stringify({ timeline })}}`;
+	const body = `{"twitter_objects":${numericIds(JSON.stringify({ tweets, users }))},"response":${JSON.stringify({ timeline, cursor })}}`;
 	return new Response(body, { headers: { "content-type": "application/json;charset=utf-8" } });
 }
 

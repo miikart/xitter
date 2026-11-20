@@ -460,7 +460,7 @@ const profileFeed =
 		revealSuspended(viewer, owner);
 		const items = await feed({ viewerId: viewer.id, authors: { user: owner }, replies: withReplies, onlyReplies, articlesOnly, kinds, limit: count, before: at });
 		let pinned: Awaited<ReturnType<typeof getPost>>;
-		if (!at && !withReplies && kinds === "both" && !articlesOnly) {
+		if (!at && !withReplies && kinds === "both" && !articlesOnly && vars.excludePinned !== true) {
 			const user = await userById(viewer.id, owner);
 			pinned = user?.pinned_post_id ? await getPost(viewer.id, user.pinned_post_id) : undefined;
 		}
