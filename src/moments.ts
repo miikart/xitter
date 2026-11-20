@@ -189,6 +189,11 @@ export async function momentCardsFor(viewerId: string, ids: string[]) {
 		const cover = media.get(row.cover_post_id ?? "") ?? [];
 		const image = cover.find((m) => m.id === row.cover_media_id) ?? cover[0];
 		const author = authors.get(row.user_id);
+		const thumbnail = image ? {
+			url: image.kind === "video" ? posterUrl(image.id) : mediaUrl(image.id, image.mime),
+			width: image.width || 1200,
+			height: image.height || 675,
+		} : { url: `${PUBLIC_ORIGIN}/public/app-icon.png`, width: 512, height: 512 };
 		const values = {
 			id: str(row.id),
 			title: str(row.title.trim() || "Untitled"),
@@ -196,11 +201,7 @@ export async function momentCardsFor(viewerId: string, ids: string[]) {
 			card_url: str(url),
 			subcategory_string: str(row.category || "Moment"),
 			...(author ? { author: { type: "USER", user_value: { id_str: row.user_id } } } : {}),
-			...(image ? { photo_image: { type: "IMAGE", image_value: {
-				url: image.kind === "video" ? posterUrl(image.id) : mediaUrl(image.id, image.mime),
-				width: image.width || 1200,
-				height: image.height || 675,
-			} } } : {}),
+			photo_image: { type: "IMAGE", image_value: thumbnail },
 		};
 		return [row.id, { rest_id: url, legacy: {
 			name: MOMENT_CARD_NAME,

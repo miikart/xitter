@@ -208,10 +208,10 @@ test("Moments end-to-end persistence, URT contract, editor UI, and visibility ru
 		const momentUrl = `${PUBLIC_ORIGIN}/i/moments/${momentId}`;
 		await sql`insert into posts (id, user_id, text, conversation_id)
 			values (${share}::bigint, ${readerId}::bigint, ${momentUrl}, ${share}::bigint)`;
-		const sharePath = `/2/timeline/conversation/${share}.json`;
-		const shareCard = async (viewer: Viewer) => {
+		const shareCard = async (viewer: Viewer, postId = share) => {
+			const sharePath = `/2/timeline/conversation/${postId}.json`;
 			const response = await restTimelineRoute("GET", sharePath, viewer, new Request(`${PUBLIC_ORIGIN}${sharePath}`));
-			return (await response!.json()).globalObjects.tweets[share].card;
+			return (await response!.json()).globalObjects.tweets[postId].card;
 		};
 		const card = await shareCard(reader);
 		expect(card.name).toBe("3260518932:moment");
@@ -219,6 +219,13 @@ test("Moments end-to-end persistence, URT contract, editor UI, and visibility ru
 		expect(card.binding_values.url.string_value).toBe(momentUrl);
 		expect(card.binding_values.photo_image.image_value.url).toContain(media1);
 		expect(await shareCard(blocked)).toBeUndefined();
+		const coverless = await createMoment(owner, { title: "Coverless Moment", visibility: "public" });
+		const coverlessShare = newId();
+		const coverlessUrl = `${PUBLIC_ORIGIN}/i/moments/${coverless.created_moment.moment.id}`;
+		await sql`insert into posts (id, user_id, text, conversation_id)
+			values (${coverlessShare}::bigint, ${readerId}::bigint, ${coverlessUrl}, ${coverlessShare}::bigint)`;
+		const coverlessCard = await shareCard(reader, coverlessShare);
+		expect(coverlessCard.binding_values.photo_image.image_value).toEqual({ url: `${PUBLIC_ORIGIN}/public/app-icon.png`, width: 512, height: 512 });
 
 		// 8. Protected account's published Moment is visible to follower (`owner`) but hidden from non-follower (`reader`)
 		const lockedMomentRes = await createMoment(locked, { title: "Protected Moment", visibility: "public" });
