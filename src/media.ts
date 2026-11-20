@@ -645,10 +645,14 @@ const PRIVATE = "private, no-store";
 // every avatar and photo was downloaded again on every page.
 const REVALIDATE = "private, no-cache";
 
-async function servedOf(id: string): Promise<Served | undefined> {
+async function servedOf(id: string, publicAvatar = false): Promise<Served | undefined> {
 	const [row] = await sql`select m.id::text, m.mime, m.user_id::text as owner, m.post_id::text as post, m.detached,
 		u.avatar_url = ('/media/' || m.id) as avatar, u.banner_url = ('/media/banner/' || m.id) as banner
-		from media m join users u on u.id = m.user_id where m.id = ${id}::bigint`;
+		from media m join users u on u.id = m.user_id where m.id = ${id}::bigint
+		${publicAvatar ? sql`and u.avatar_url = '/media/' || m.id and u.instance is null and not u.instance_blocked
+			and u.status = 'active' and u.deactivated_at is null and not u.protected
+			and m.remote_instance is null and m.kind = 'photo' and m.state = 'ready' and not m.detached
+			and m.post_id is null and not exists (select 1 from polls where choice_media @> array[m.id])` : sql``}`;
 	return row as Served | undefined;
 }
 
@@ -726,11 +730,14 @@ function profileSize(served: Served, bannerPath: boolean, extension: string | un
 	}
 }
 
-export async function serveMedia(req: Request, pathname: string, viewer: Viewer): Promise<Response> {
+export async function serveMedia(req: Request, pathname: string, viewer?: Viewer): Promise<Response> {
+	const avatar = PROFILE_IMAGE_PATH.exec(pathname);
+	if (!viewer && (!avatar || (req.method !== "GET" && req.method !== "HEAD")))
+		return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	const cardVideo = /^\/media\/card-video\/(\d{1,19})\.xml$/.exec(pathname);
 	const poster = /^\/media\/poster\/(\d{1,19})\.jpg$/.exec(pathname);
-	if (cardVideo && isId(cardVideo[1])) return serveConversationVideo(cardVideo[1], viewer);
-	if (poster && isId(poster[1])) {
+	if (viewer && cardVideo && isId(cardVideo[1])) return serveConversationVideo(cardVideo[1], viewer);
+	if (viewer && poster && isId(poster[1])) {
 		const body = await remoteMediaFile(poster[1], true);
 		const served = body && (await servedOf(poster[1]));
 		const cache = served && (await cacheFor(viewer, served));
@@ -739,21 +746,21 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 		if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 		return new Response(body, { headers });
 	}
-	const avatar = PROFILE_IMAGE_PATH.exec(pathname);
 	const m = avatar ? null : /^\/media\/(banner\/)?(\d{1,19})(?:\.([a-z0-9]+))?(?:\/([\w-]+))?$/.exec(pathname);
 	const id = avatar?.[1] ?? m?.[2];
 	if (!isId(id)) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const served = await servedOf(id);
+	const served = await servedOf(id, !viewer);
 	const extension = avatar?.[3]?.toLowerCase();
 	if (!served || (avatar && (!served.avatar || EXT[served.mime] !== (extension === "jpeg" ? "jpg" : extension)))) {
 		return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	}
-	const cache = await cacheFor(viewer, served);
+	const cache = viewer ? await cacheFor(viewer, served) : REVALIDATE;
 	const source = cache && await remoteMediaFile(id);
 	if (!cache || !source) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	const variantName = avatar ? avatar[2]?.toLowerCase() ?? null : m?.[4] ?? new URL(req.url).searchParams.get("name");
 	const dimensions = profileSize(served, !!m?.[1], m?.[3], variantName);
-	const variant = dimensions && await profileVariant(served.id, source, served.mime, ...dimensions, !!avatar);
+	const exact = !!avatar && (variantName === "200x200" || variantName === "400x400");
+	const variant = dimensions && await profileVariant(served.id, source, served.mime, ...dimensions, { keepFormat: !!avatar, exact });
 	const body = variant?.body ?? source;
 	const tag = variant ? (cache === REVALIDATE ? { etag: variant.etag } : {}) : tagOf(served, body, cache);
 	const headers: Record<string, string> = { "content-type": servedType(variant?.mime ?? served.mime), "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, "accept-ranges": "bytes", ...tag };

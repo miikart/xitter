@@ -97,6 +97,9 @@ if (Bun.spawnSync([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=
 	const b = await (await apply("banner")).json();
 	const avatarUrl = String(a.profile_image_url_https);
 	check("profile reports the normal avatar path", new URL(avatarUrl).pathname === `/profile_images/${id}/avatar_normal.jpg`, avatarUrl);
+	const anonymousAvatar = await fetch(avatarUrl.replace("_normal", "_bigger"));
+	check("current public avatar loads without a session or media token", anonymousAvatar.ok && anonymousAvatar.headers.get("content-type") === "image/jpeg");
+	check("original upload still requires authorization", (await fetch(`${origin}/media/${id}?name=orig`)).status === 404);
 	const source = await fetch(`${origin}/media/${id}?name=orig`, { headers });
 	const original = await source.arrayBuffer();
 	const variants = [["mini", 24], ["normal", 48], ["bigger", 73], ["reasonably_small", 128], ["200x200", 200], ["400x400", 400]] as const;
@@ -112,6 +115,20 @@ if (Bun.spawnSync([ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=
 		const etag = res.headers.get("etag");
 		const cached = etag && await fetch(url, { headers: { ...headers, "if-none-match": etag } });
 		check(`profile image ${expected} revalidates`, !!cached && cached.status === 304);
+	}
+	const small = await upload("public/default_profile_0_normal.png", "profile_image", 1);
+	const applied = await fetch(`${origin}/i/api/1.1/account/update_profile_image.json`, {
+		method: "POST", headers, body: new URLSearchParams({ media_id: small }),
+	});
+	const smallUrl = String((await applied.json()).profile_image_url_https);
+	check("replaced avatar is unavailable without authorization", (await fetch(avatarUrl)).status === 404);
+	for (const side of [200, 400]) {
+		const expected = `${side}x${side}`;
+		const res = await fetch(smallUrl.replace("_normal", `_${expected}`), { headers });
+		const probe = Bun.spawnSync([ffprobe, "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", "pipe:0"], {
+			stdin: Buffer.from(await res.arrayBuffer()),
+		});
+		check(`an undersized avatar serves ${expected}`, res.ok && probe.stdout.toString().trim() === expected, probe.stdout.toString().trim());
 	}
 }
 const gifPath = join(dir, "anim.gif");

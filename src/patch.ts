@@ -220,7 +220,10 @@ export const clearPatchCache = () => {
 };
 
 const sizedAvatar = (url: string, size: "200x200" | "400x400") =>
-	String.raw`${url}?.replace(/(\/profile_images\/\d+\/avatar|\/default_profile_images\/default_profile)_normal(?=\.)/,"$1_${size}")`;
+	String.raw`${url}?.replace(/(\/profile_images\/\d+\/avatar|\/default_profile_images\/default_profile)_(?:mini|normal|bigger|x96|reasonably_small|200x200|400x400)(?=\.)/,"$1_${size}")`;
+
+const profileHeaderAvatar = (url: string) =>
+	String.raw`${sizedAvatar(url, "200x200")}.replace(/^(?:https?:\/\/[^/]+)?\/(?:abs\/)?sticky\/default_profile_images\/default_profile_200x200\.png(?:[?#].*)?$/,"https://abs.twimg.com/sticky/default_profile_images/default_profile_200x200.png")`;
 
 // the name can change while the server runs, so script files are cached per name
 export function patchFile(key: string, raw: Buffer, original = false): Buffer {
@@ -231,12 +234,19 @@ export function patchFile(key: string, raw: Buffer, original = false): Buffer {
 	if (!hit) {
 		let text = patchText(raw.toString("utf8"), key.startsWith("/x-web/xchat/"));
 		if (/\/bundle\.UserAvatar\.[^/]+\.js$/.test(key)) {
-			text = text.replace(/((?:mediaUrl|uri):(?:[\w$]+&&)?)([\w$]+\.profile_image_url_https)(?=[,}])/g,
+			text = text.replace(/((?:mediaUrl|uri|media_url_https|expanded_url):(?:[\w$]+&&)?)([\w$]+\.profile_image_url_https)(?=[,}])/g,
 				(_, prop, url) => prop + sizedAvatar(url, "400x400"));
 		}
 		if (/\/web\/(?:ltr\/)?bundle\.UserProfile\.[^/]+\.js$/.test(key)) {
 			text = text.replace(/(_renderAvatar=function\(\)\{[^{}]{0,350}\?void 0:)([\w$]+\.profile_image_url_https)(?=;return)/g,
-				(_, prefix, url) => prefix + sizedAvatar(url, "200x200"));
+				(_, prefix, url) => prefix + profileHeaderAvatar(url));
+		}
+		if (/\/client-web(?:-legacy)?\/bundle\.UserProfile\.[^/]+\.js$/.test(key)) {
+			text = text.replace(/size:"custom",(?:style:[\w$.]+\.avatar\b|uri:[\w$]+,screenName:[\w$]+\.screen_name\b)/g, "xitterProfileAvatar:!0,$&");
+		}
+		if (/\/client-web(?:-legacy)?\/main\.[^/]+\.js$/.test(key) && text.includes("getAvatarStyles")) {
+			text = text.replace(/(aspectMode:[\w$.]+\.exact\(([\w$]+)\.aspectRatio\),backgroundColor:\2\.backgroundColor\|\|[\w$.]+\.gray300,image:([\w$]+),)(?=layoutCache:)/g,
+				(_, props, avatar, url) => `${props}customVariants:${avatar}.xitterProfileAvatar?((uri)=>uri?.includes("_200x200.")?[{uri,width:200,height:200}]:void 0)(${profileHeaderAvatar(url)}):void 0,`);
 		}
 		if (js && !original) text = brandText(text, name, !I18N.test(key));
 		hit = Buffer.from(text);

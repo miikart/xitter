@@ -143,9 +143,10 @@ async function encodePhoto(data: Buffer, image: Image, resize: string, quality: 
 	});
 }
 
-function profileResize(width: number, height: number) {
+function profileResize(width: number, height: number, exact = false) {
 	const crop = `crop='min(iw,ih*${width}/${height})':'min(ih,iw*${height}/${width})':exact=1`;
-	return `${crop},scale='min(iw,${width})':'min(ih,${height})':flags=lanczos,setsar=1`;
+	const size = exact ? `${width}:${height}` : `'min(iw,${width})':'min(ih,${height})'`;
+	return `${crop},scale=${size}:flags=lanczos,setsar=1`;
 }
 
 export function encodeAvatar(data: Buffer, image: Image) {
@@ -157,10 +158,13 @@ const profileVariants = new Map<string, ProfileVariant | undefined>();
 const profileJobs = new Map<string, Promise<ProfileVariant | undefined>>();
 let profileBytes = 0;
 
-export async function profileVariant(id: string, source: Blob, mime: string, width: number, height: number, keepFormat = false): Promise<ProfileVariant | undefined> {
+export async function profileVariant(
+	id: string, source: Blob, mime: string, width: number, height: number,
+	{ keepFormat, exact }: { keepFormat: boolean; exact: boolean },
+): Promise<ProfileVariant | undefined> {
 	const modified = (source as Blob & { lastModified?: number }).lastModified;
 	if (!modified || !PHOTO_FORMATS.has(mime) || source.size > 32 * 1024 * 1024) return;
-	const key = `${id}-${modified}-${source.size}-${width}x${height}${keepFormat ? `-${mime}` : ""}`;
+	const key = `${id}-${modified}-${source.size}-${width}x${height}${keepFormat ? `-${mime}` : ""}${exact ? "-exact" : ""}`;
 	if (profileVariants.has(key)) {
 		const hit = profileVariants.get(key);
 		profileVariants.delete(key);
@@ -174,10 +178,10 @@ export async function profileVariant(id: string, source: Blob, mime: string, wid
 		const bytes = Buffer.from(await source.arrayBuffer());
 		const image = sniffImage(bytes);
 		if (!image || image.mime !== mime) return;
-		const fits = width === height && image.width === image.height && image.width <= width;
+		const fits = width === height && image.width === image.height && (exact ? image.width === width : image.width <= width);
 		const encoded = fits && exifOrientation(bytes) === 1
 			? { data: bytes, image }
-			: await encodePhoto(bytes, image, profileResize(width, height), 80, keepFormat ? "typed-variant" : "variant");
+			: await encodePhoto(bytes, image, profileResize(width, height, exact), 80, keepFormat ? "typed-variant" : "variant");
 		if (!encoded) return;
 		const variant = encoded.data === bytes ? undefined : {
 			body: new Blob([new Uint8Array(encoded.data)]),
