@@ -47,6 +47,7 @@ export const RULES = {
 	mail: { limit: 5, window: 60 * MIN },
 	federation: { limit: 30_000, window: 15 * MIN },
 	translate: { limit: 150, window: 15 * MIN },
+	grok: { limit: 100, window: 24 * 60 * MIN },
 	// calls an instance importing an account makes with its migration code (migration.ts)
 	migration: { limit: 20_000, window: 15 * MIN },
 } satisfies Record<string, Rule>;
@@ -264,7 +265,10 @@ async function readOperationTypes() {
 
 void readOperationTypes();
 
+const GROK_MUTATIONS = new Set(["CreateGrokConversation", "ClearGrokConversations", "DeleteGrokMessage", "GrokPinConversation", "GrokUnpinConversation"]);
+
 export const isMutation = (operation: string) =>
+        GROK_MUTATIONS.has(operation) ||
         operationTypes.mutations.has(operation) ||
         (/Mutation$/.test(operation) && !operationTypes.queries.has(operation));
 

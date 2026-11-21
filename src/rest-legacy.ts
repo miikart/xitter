@@ -32,7 +32,7 @@ import {
 } from "./moments";
 import { PostError, setPinned } from "./posts";
 import { followList, setFollow, userById, userByName, usersByIds } from "./users";
-import { unreadCount } from "./notifications";
+import { markSeen, unreadCount } from "./notifications";
 import { failure, gone, restNotifications, restStatus, restTimeline, restUser, status } from "./rest-timeline";
 
 type Obj = Record<string, any>;
@@ -157,7 +157,7 @@ const GET: Record<string, Handler> = {
 	"/1.1/trends/available.json": () => [],
 	"/1.1/trends/plus.json": () => ({ modules: [], timestamp: Date.now() }),
 	"/1.1/activity/about_me.json": () => [],
-	"/1.1/activity/about_me/unread.json": () => ({ unread_count: 0 }),
+	"/1.1/activity/about_me/unread.json": async (v) => ({ unread_count: await unreadCount(v.id) }),
 	"/1.1/application/rate_limit_status.json": () => ({ rate_limit_context: { access_token: "" }, resources: {} }),
 	"/1.1/account/personalization/app_graph.json": () => ({ app_graph: [] }),
 	"/1.1/account/personalization/partner_interests.json": () => ({ interests: [] }),
@@ -175,7 +175,6 @@ const GET: Record<string, Handler> = {
 
 // POSTs with nothing to change or nothing to report
 const ACK = [
-	"/1.1/activity/about_me/unread.json",
 	"/1.1/device/register.json",
 	"/1.1/device/register_complete.json",
 	"/1.1/device/unregister.json",
@@ -191,6 +190,10 @@ const ACK = [
 ];
 
 const POST: Record<string, Handler> = {
+	"/1.1/activity/about_me/unread.json": async (v, q) => {
+		await markSeen(v.id, q.get("cursor"));
+		return { unread_count: 0 };
+	},
 	"/1.1/account/pin_tweet.json": async (v, q) => {
 		const id = q.get("id");
 		if (!isId(id) || !(await setPinned(v.id, id))) throw new PostError("You can only pin your own posts.", 144);

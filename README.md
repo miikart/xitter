@@ -77,7 +77,10 @@ with a [July 15, 2019 Twitter web capture](https://web.archive.org/web/201907152
   `/account/migrate`): see [Moving accounts](#moving-accounts)
 - Reporting posts and accounts
 - Account analytics (Overview, Content and each post's page) from the
-  instance's own counts
+  instance's own counts. The Creator Studio link opens these analytics.
+- Grok chat on the current web client when enabled in Admin > Settings and
+  a model provider is configured. The configured provider receives chat prompts
+  and recent messages from the conversation.
 - Sticker packs made by staff (Admin > Stickers), picked from a button beside
   the composer's emoji button and posted as images
 - Branded hashtags (X's branded likes and hashmoji, Admin > Branded
@@ -375,6 +378,9 @@ is the default for members and the build used by guests.
 | `FFMPEG`, `FFPROBE` | `ffmpeg`, `ffprobe` | Video tools |
 | `MAX_VIDEO_MB`, `MAX_VIDEO_SECONDS` | `200`, `600` | Starting video limits (changeable in the panel) |
 | `SOURCE_URL` | this repository | The source link shown to users |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` | unset | Claude credentials for Grok chat |
+| `GROK_MODEL` | `claude-haiku-5-5` | Claude model used by Grok chat |
+| `BEE_URL` | unset | BeeLLM's OpenAI-compatible server URL. When set, Grok uses BeeLLM instead of Claude |
 | `LOG_REQUESTS` | unset | `1` logs every API call, `errors` also prints the client's error reports |
 | `RATE_LIMITS` | on | `off` turns the rate limits off (for the test scripts; limits are in `src/ratelimit.ts`, `scripts/test-ratelimit.ts` checks them) |
 | `TRUSTED_PROXIES` | unset | Comma-separated addresses or ranges (`127.0.0.1`, `172.16.0.0/12`) whose `CF-Connecting-IP` header is believed, besides Cloudflare's own ranges: set it to a Cloudflare tunnel's address. A plain nginx or Caddy passes the visitor's header on, so leave it out of this list |

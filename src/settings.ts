@@ -21,7 +21,7 @@ export const FEATURES = {
 	premium: "Premium and verification upsells",
 	calls: "Calls",
 	history: "History",
-	creator_studio: "Creator Studio and monetization",
+	creator_studio: "Creator Studio link to account analytics",
 	spaces: "Spaces",
 	business: "Business sign-up",
 	notes_everyone: "Anyone can write Community Notes (off: only accounts given access on their admin page)",

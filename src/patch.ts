@@ -171,6 +171,14 @@ export function patchText(text: string, chat = false): string {
 	for ([re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
 	out = patchCountryAudience(out);
 	out = patchCircleComposer(out);
+	if (out.includes("containerModern") && out.includes("gradientBackground")) {
+		out = out.replace(/(let ([\w$]+)=\[[\w$]+\.container,[\w$]+\];return [\w$]+===[\w$]+\.transparent&&\2\.push\([\w$]+\.transparent\),\(0,[\w$]+\.jsx\)\([\w$.]+,\{style:\2,)(?=\.\.\.[\w$]+\})/g,
+			'$1testID:"xitter-sidebar-card",');
+	}
+	if (out.includes("getGrokAccountLinkStatus")) {
+		out = out.replace(/return\(null!=\(([\w$]+)=([^;]{1,60}?)\)&&([\w$]+)\(\)\?(?=\([^;]{1,350}?\.getGrokAccountLinkStatus\(\1\.environment\)\)\))/g,
+			'return(null!=($1=$2)&&$1.featureSwitches.isTrue("responsive_web_grok_xweb_replacement_enabled")&&$3()?');
+	}
 	if (out.includes("extraInitParams") && out.includes(".rz.ProfileBanner")) {
 		out = out.replace(/(case ([\w$]+)\.rz\.ProfileBanner:return \2\.d3\.ProfileBanner;)(?=default:return null)/g,
 			'$1case $2.rz.Avatar:return "profile_image";');

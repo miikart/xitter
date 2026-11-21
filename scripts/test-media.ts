@@ -51,12 +51,85 @@ const post = created.data?.create_tweet?.tweet_results?.result;
 const media = post?.legacy?.extended_entities?.media?.[0];
 check("photo-only post", media?.id_str === photo, { type: media?.type, size: media?.original_info, url: media?.media_url_https });
 
+for (const [version, text] of [["4.1.9", "\u200b"], ["6.17.0", ""]]) {
+	const res = await fetch(`${origin}/1.1/statuses/show.json?id=${post.rest_id}`, {
+		headers: { ...headers, "user-agent": `TwitterAndroid/${version}` },
+	});
+	const tweet = await res.json();
+	check(`Android ${version} photo-only response includes the photo and expected text`,
+		res.ok && tweet.text === text && tweet.entities?.media?.[0]?.id_str === photo, res.status);
+}
+
 const file = await fetch(media.media_url_https, { headers });
 check("photo is served to a signed-in user", file.status === 200 && !!file.headers.get("content-type")?.startsWith("image/"), `${file.status} ${file.headers.get("content-type")}`);
 check("photo is hidden from visitors", (await fetch(media.media_url_https)).status === 404);
 const stolen = await gql("CreateTweet", { tweet_text: "reuse", media: { media_entities: [{ media_id: photo }] } });
 check("an upload cannot be attached twice", !stolen.data?.create_tweet?.tweet_results?.result?.legacy?.extended_entities);
 for (const id of [post?.rest_id, stolen.data?.create_tweet?.tweet_results?.result?.rest_id]) if (id) await gql("DeleteTweet", { tweet_id: id });
+
+const classicHeaders = { "user-agent": "TwitterAndroid/6.17.0", authorization: `OAuth oauth_token="${cookies.find((c) => /^(?:__Host-)?auth_token=/.test(c))!.split("=")[1]}"` };
+const classicForm = new FormData();
+classicForm.set("media", new Blob([readFileSync(imagePath)], { type: "application/octet-stream" }), "photo");
+const classicUpload = await fetch(`${origin}/1.1/media/upload.json`, {
+	method: "POST",
+	headers: { ...classicHeaders, "user-agent": "TwitterAndroid/6.17.0 MiikartUpload/1" },
+	body: classicForm,
+});
+const uploadBody = await classicUpload.text();
+const { media_id_string: classicId } = JSON.parse(uploadBody);
+check("classic multipart returns the same exact media ID in both fields", classicUpload.status === 200
+	&& /^\d+$/.test(classicId) && /"media_id":(\d+)[,}]/.exec(uploadBody)?.[1] === classicId, classicUpload.status);
+const classicUpdate = (fields: Record<string, string>, version = "6.17.0") => fetch(`${origin}/1.1/statuses/update.json`, {
+	method: "POST", headers: { ...classicHeaders, "user-agent": `TwitterAndroid/${version}` }, body: new URLSearchParams(fields),
+});
+const classicPhoto = await classicUpdate({ status: "classic photo", media_ids: classicId, include_entities: "true", include_media_features: "true" });
+const classicPhotoBody = await classicPhoto.text();
+const classicPost = JSON.parse(classicPhotoBody);
+const classicMedia = classicPost.extended_entities?.media?.[0];
+check("classic status contains the same attachment ID and caption", classicPhoto.ok && classicPost.text === "classic photo"
+	&& classicMedia?.id_str === classicId && classicPost.entities?.media?.[0]?.id_str === classicId
+	&& typeof classicMedia?.media_url_https === "string"
+	&& classicPhotoBody.includes(`"id":${classicId},"id_str":"${classicId}"`), classicPhoto.status);
+check("6.17.0 photo post names its Android app", classicPost.source === "Twitter 6.17.0 for Android", classicPost.source);
+if (classicMedia?.media_url_https) {
+	const variant = new URL(classicMedia.media_url_https);
+	const format = variant.pathname.split(".").at(-1)!;
+	variant.pathname = variant.pathname.replace(/\.[^.]+$/, "");
+	variant.searchParams.set("format", format);
+	variant.searchParams.set("name", "large");
+	const downloaded = await fetch(variant);
+	check("classic image variant loads without sign-in headers", downloaded.ok && downloaded.headers.get("content-type")?.startsWith("image/") === true, downloaded.status);
+	variant.searchParams.delete("mt");
+	check("classic photo still requires media authorization", (await fetch(variant)).status === 404);
+}
+const classicText = await classicUpdate({ status: "classic text" }, "4.1.9");
+const classicTextPost = await classicText.json();
+check("classic text-only status still posts", classicText.ok && classicTextPost.text === "classic text" && !classicTextPost.extended_entities, classicText.status);
+check("4.1.9 text post names its Android app", classicTextPost.source === "Twitter 4.1.9 for Android", classicTextPost.source);
+
+const segmentedPhoto = readFileSync(imagePath);
+const classicSegment = (phase: string, fields: Record<string, string>, body?: FormData) => fetch(`${origin}/1.1/media/upload.json`, {
+	method: "POST", headers: { ...classicHeaders, "X-SessionPhase": phase, ...fields }, body,
+});
+const classicInit = await classicSegment("INIT", { "X-TotalBytes": String(segmentedPhoto.length) });
+const initBody = await classicInit.text();
+const { media_id_string: segmentedId } = JSON.parse(initBody);
+check("classic segmented INIT returns an exact numeric media ID", classicInit.status === 202
+	&& /^\d+$/.test(segmentedId) && /"media_id":(\d+)[,}]/.exec(initBody)?.[1] === segmentedId, classicInit.status);
+const split = Math.ceil(segmentedPhoto.length / 2);
+for (const [index, bytes] of [segmentedPhoto.subarray(0, split), segmentedPhoto.subarray(split)].entries()) {
+	const form = new FormData();
+	form.set("media", new Blob([bytes]), "segment");
+	const append = await classicSegment("APPEND", { "X-MediaId": segmentedId, "X-SegmentIndex": String(index) }, form);
+	check(`classic segmented APPEND ${index}`, append.status === 204, append.status);
+}
+const classicFinalize = await classicSegment("FINALIZE", { "X-MediaId": segmentedId });
+check("classic segmented FINALIZE returns the same ID", classicFinalize.ok && (await classicFinalize.json()).media_id_string === segmentedId, classicFinalize.status);
+const classicSegmentedStatus = await classicUpdate({ status: "classic segmented photo", media_ids: segmentedId });
+const classicSegmentedPost = await classicSegmentedStatus.json();
+check("classic segmented photo attaches to the status", classicSegmentedStatus.ok
+	&& classicSegmentedPost.extended_entities?.media?.[0]?.id_str === segmentedId, classicSegmentedStatus.status);
+for (const id of [classicPost.id_str, classicTextPost.id_str, classicSegmentedPost.id_str]) if (id) await gql("DeleteTweet", { tweet_id: id });
 
 // alt text and the sensitive flag travel with the post
 const described = await upload(imagePath, "tweet_image");
@@ -77,6 +150,17 @@ if (flaggedPost?.rest_id) await gql("DeleteTweet", { tweet_id: flaggedPost.rest_
 const avatar = await upload(imagePath, "profile_image", 1);
 const a = await (await fetch(`${origin}/i/api/1.1/account/update_profile_image.json`, { method: "POST", headers, body: new URLSearchParams({ media_id: avatar, return_user: "true" }) })).json();
 check("avatar set", String(a.profile_image_url_https).includes(avatar), a.profile_image_url_https);
+const kitkatProfile = await (await fetch(`${origin}/1.1/account/verify_credentials.json`, {
+	headers: { ...classicHeaders, "user-agent": "TwitterAndroid/4.1.9", "x-forwarded-proto": "http" },
+})).json();
+const kitkatAvatar = new URL(kitkatProfile.profile_image_url_https);
+check("KitKat HTTP uses a distinct avatar path", kitkatAvatar.protocol === "http:"
+	&& kitkatAvatar.pathname === new URL(a.profile_image_url_https).pathname.replace("/avatar_normal.", "/avatar-http_normal.")
+	&& kitkatAvatar.pathname.includes("/avatar-http_normal."), kitkatAvatar.pathname);
+for (const size of ["_normal", "_reasonably_small", ""]) {
+	const res = await fetch(kitkatAvatar.href.replace("_normal.", `${size}.`));
+	check(`KitKat avatar size ${size || "original"} loads without sign-in`, res.ok && res.headers.get("content-type")?.startsWith("image/") === true, res.status);
+}
 // an animated GIF avatar the way the patched client sends one: whole, with
 // the crop box after the trailer (patch.ts)
 const ffmpeg = process.env.FFMPEG ?? "ffmpeg";

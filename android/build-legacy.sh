@@ -11,14 +11,18 @@ WORK="${WORK:-$ROOT/4.1.9}"
 APKTOOL="${APKTOOL:-$ROOT/tools/apktool_3.0.2.jar}"
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
 BT="$(ls -d "$SDK"/build-tools/* | tail -1)"
-KEYSTORE="${KEYSTORE:-$HOME/.android/debug.keystore}"
+HOST="${HOST:-miikart.co}"
+SCHEME="${SCHEME:-http}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$WORK/out"
+APK="${OUTPUT:-$OUT/twitter-4.1.9-miikart.apk}"
+
+export HOST SCHEME ANDROID_HOME="$SDK" APKTOOL
 
 rm -rf "$WORK/unpacked"
 java -jar "$APKTOOL" d -f -o "$WORK/unpacked" "$WORK/twitter-4.1.9.apk"
 
-echo "== patching =="
+echo "== patching ($SCHEME://$HOST) =="
 bun "$HERE/patch-legacy.ts" "$WORK/unpacked"
 
 echo "== rebuilding =="
@@ -27,17 +31,12 @@ java -jar "$APKTOOL" b "$WORK/unpacked" -o "$OUT/unsigned.apk"
 "$BT/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
 echo "== signing (v1 + v2, so Android 2.3 through 8 accept it) =="
-"$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --min-sdk-version 9 --out "$OUT/twitter-4.1.9-miikart.apk" "$OUT/aligned.apk"
-echo "built $OUT/twitter-4.1.9-miikart.apk"
-
-# the emulator's x86 image has no ARM libraries to load, so its build leaves them
-# out (only the photo filters use them)
-rm -rf "$WORK/emu" && cp -r "$WORK/unpacked" "$WORK/emu" && rm -rf "$WORK/emu/lib"
-java -jar "$APKTOOL" b "$WORK/emu" -o "$OUT/emu-unsigned.apk"
-"$BT/zipalign" -f 4 "$OUT/emu-unsigned.apk" "$OUT/emu-aligned.apk"
-"$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --min-sdk-version 9 --out "$OUT/twitter-4.1.9-miikart-emulator.apk" "$OUT/emu-aligned.apk"
-rm -rf "$WORK/emu" "$OUT"/emu-*.apk "$OUT"/*.idsig
-echo "built $OUT/twitter-4.1.9-miikart-emulator.apk"
+sh "$HERE/sign-apk.sh" "$OUT/aligned.apk" "$APK" 9
+echo "built $APK"
 
 [ "$1" = "--no-install" ] && exit 0
-adb install -r "$OUT/twitter-4.1.9-miikart.apk"
+if [ -n "$ADB_SERIAL" ]; then
+	adb -s "$ADB_SERIAL" install -r "$APK"
+else
+	adb install -r "$APK"
+fi

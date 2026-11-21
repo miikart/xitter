@@ -29,6 +29,8 @@ import { legacyUser, withClassicVerification } from "./model";
 import { patchText } from "./patch";
 import { BRAND_NAME, PWA_SCRIPT, brandIcons, originalBrand, pwaHead } from "./pwa";
 import { MONEY_UI_CSS, MONEY_UI_SCRIPT } from "./money-ui";
+import { grokReady } from "./grok";
+import { initialUserClaims } from "./user-claims";
 
 // account settings as the client expects them
 export function settingsFor(user: User): Record<string, unknown> {
@@ -118,10 +120,6 @@ ${HERO} svg{opacity:0}
 ${CODE_BOXES}{justify-content:center;gap:6px}
 ${CODE_BOXES} > .jf-code-box{flex:1 1 0;min-width:0;max-width:56px}`;
 
-// Paid features the client gates on a per-account claim. Nothing is paid for
-// here, so every account holds them.
-const CLAIMED_FEATURES = Object.fromEntries(["subscriptions_feature_article_composer", "subscriptions_feature_highlights", "subscriptions_feature_1002"].map((k) => [k, { value: "true" }]));
-
 // Switches whose values name x.com hosts. The client checks them against host
 // lists that patch.ts has already rewritten, so the captured value would fail;
 // without the switch the client falls back to its (patched) default.
@@ -164,6 +162,13 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_edit_tweet_composition_enabled: { value: true },
 	responsive_web_edit_tweet_perspective_enabled: { value: true },
 	responsive_web_grok_tweet_translation: { value: false },
+	responsive_web_grok_api_enable_grok_host: { value: false },
+	responsive_web_grok_xweb_replacement_enabled: { value: false },
+	responsive_web_grok_top_up_enabled: { value: false },
+	responsive_web_grok_file_upload_enabled: { value: false },
+	responsive_web_grok_voice_mode_enabled: { value: false },
+	subscriptions_inapp_grok_upsell_enabled: { value: grokReady() },
+	creator_studio_nav_enabled: { value: feature("creator_studio") },
 	responsive_web_translation_feedback_enabled: { value: false },
 });
 // every build's, then the serving build's own
@@ -217,7 +222,14 @@ const FLAT_STATE = {
 	entities: { tweets: { entities: {}, errors: {}, fetchStatus: {} }, cards: { entities: {}, errors: {}, fetchStatus: {} } },
 	settings: { local: { themeBackground: "light", mediaPreviewsEnabled: true, conversationTreeEnabled: false }, transient: { dtabBarInfo: { dtabAll: null, dtabRweb: null, hide: false } } },
 	session: { emailLiteLoginEligibility: { fetchStatus: "none" }, oneFactorLoginEligibility: { fetchStatus: "none" } },
-	devices: { notificationSettings: { sms_settings: { error: null, fetchStatus: "none" }, sms_settings_template: { template: { settings: [] } } } },
+	devices: { notificationSettings: {
+		sms_settings: { error: null, fetchStatus: "none" },
+		sms_settings_template: { template: { settings: [] } },
+		_pushSettings: {},
+		_pushSettingsTemplate: {},
+		_smsSettings: { error: null, fetchStatus: "none" },
+		_smsSettingsTemplate: {},
+	} },
 };
 
 function fillMissing(into: Record<string, any>, from: Record<string, any>) {
@@ -298,7 +310,7 @@ function buildState(user: User | null, fs: NonNullable<ReturnType<typeof loadBui
 			},
 		},
 		educationFlags,
-		userClaim: { config: { subscriptions: {}, features: CLAIMED_FEATURES }, commerceSubscriptions: [], debug: {}, fetchStatus: "loaded" },
+		userClaim: initialUserClaims(user),
 		session: {
 			communitiesActions: { create: true },
 			country: "US",
@@ -327,6 +339,10 @@ const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const inline = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
 const runtimePatched = new Map<string, string>();
+
+export function patchClientRuntime(runtime: string): string {
+	return patchText(runtime.replace(/(\.p\s*=\s*["'])https:\/\/(?:abs|ma)(?:-\d+)?\.twimg\.com(?=\/(?:twitter-assets\/)?responsive-web\/web\/(?:ltr|rtl)\/["'])/g, "$1/abs"));
+}
 
 // When 2022-11 is booted solely to host Twitter's Moment Maker on an instance running
 // another client build (e.g. 2019-07-new-twitter), navigating outside /i/moment_maker
@@ -404,7 +420,7 @@ export function shell(
 	const signup = !user && settings().signup_mode !== "closed" && !settings().operations.maintenance;
 	let patchedRuntime = runtimePatched.get(build.sha);
 	if (!patchedRuntime) {
-		patchedRuntime = patchText(runtime);
+		patchedRuntime = patchClientRuntime(runtime);
 		runtimePatched.set(build.sha, patchedRuntime);
 	}
 	// the chat build's address is ours (the rest of the metadata stays as captured:

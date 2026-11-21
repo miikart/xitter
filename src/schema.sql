@@ -1902,3 +1902,21 @@ create table if not exists moment_subscriptions (
 	primary key (moment_id, user_id)
 );
 create index if not exists moment_subscriptions_user_idx on moment_subscriptions (user_id, created_at desc);
+
+create table if not exists grok_conversations (
+	id bigint primary key,
+	user_id bigint not null references users(id) on delete cascade,
+	title text not null default '',
+	pinned boolean not null default false,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+create index if not exists grok_conversations_user on grok_conversations (user_id, updated_at desc);
+create table if not exists grok_items (
+	id bigint primary key,
+	conversation_id bigint not null references grok_conversations(id) on delete cascade,
+	sender text not null check (sender in ('User', 'Agent')),
+	message text not null,
+	created_at timestamptz not null default now()
+);
+create index if not exists grok_items_conversation on grok_items (conversation_id, id);

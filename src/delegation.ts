@@ -64,6 +64,7 @@ const ANALYTICS_OPS = /^(accountOverview|activeFollowersTile|useFetchAnalytics|c
 // these few tell nothing about the account's messages.
 const CHAT_HARMLESS = new Set(["viewerQuery", "useDirectCallSetupQuery", "GetExternalAppIntegrationsQuery"]);
 export function delegateMay(role: Role, method: string, path: string, operation: string | undefined): boolean {
+	if (path === "/2/grok/add_response.json" || (operation && /Grok(?!Home$)/.test(operation))) return false;
 	if (operation && Object.hasOwn(chatHandlers, operation) && !CHAT_HARMLESS.has(operation)) return false;
 	if (operation && role !== "Admin" && ANALYTICS_OPS.test(operation)) return false;
 	// A mutation the pinned build hasn't been scanned for yet can arrive as a

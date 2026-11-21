@@ -32,9 +32,12 @@ export async function createPlatform(label: string, actorId: string) {
 	return { id, label, token };
 }
 
-export async function platformSource(req: Request): Promise<string | null> {
+export async function platformSource(req: Request, legacyOAuth = false): Promise<string | null> {
 	const token = /^Bearer\s+(\S+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
-	if (!token?.startsWith("xitter_")) return webSource();
+	if (!token?.startsWith("xitter_")) {
+		const version = legacyOAuth && /^TwitterAndroid\/(4\.1\.9|6\.17\.0)(?=\s|$)/i.exec(req.headers.get("user-agent") ?? "")?.[1];
+		return version ? `Twitter ${version} for Android` : webSource();
+	}
 	const [platform] = await sql`select label from client_platforms where token_hash = ${hash(token)} and not revoked`;
 	return platform?.label ?? null;
 }

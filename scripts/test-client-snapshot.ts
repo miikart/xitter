@@ -1,13 +1,19 @@
 import { expect, test } from "bun:test";
 import { clientPathAllowed } from "../src/client-cache";
 import { snapshotPage } from "../src/client-snapshot";
-import { switchReport } from "../src/shell";
+import { patchClientRuntime, switchReport } from "../src/shell";
 import { runInNewContext } from "node:vm";
 import { BROWSER_BUILD_SCRIPT } from "../src/client-preference";
+import { patchText } from "../src/patch";
 
 const entry = "/twitter-assets/responsive-web/web/ltr/main.aabbccdd.js";
 const runtime = "/twitter-assets/responsive-web/web/ltr/runtime.11223344.js";
 const entryScript = `<script src="https://ma-0.twimg.com${entry}"></script>`;
+
+test("marks sidebar card wrappers so empty cards can be hidden", () => {
+	const wrapper = 'function s(p){if(p.modern)return {containerModern,gradientBackground};let e=[n.container,t];return a===l.transparent&&e.push(n.transparent),(0,o.jsx)(r.A,{style:e,...i})}';
+	expect(patchText(wrapper)).toContain('style:e,testID:"xitter-sidebar-card",...i');
+});
 
 test("rejects classic desktop init.js pages", () => {
 	const html = '<script src="https://abs.twimg.com/c/swift/en/init.0123456789abcdef.js"></script>';
@@ -32,6 +38,15 @@ test("recognizes Twitter Lite asset paths in a supported startup page", () => {
 	expect(snapshot.runtimeScript).toBe(runtime);
 	expect(clientPathAllowed(entry)).toBe(true);
 	expect(clientPathAllowed("/twitter-assets/twitter-mobile/aabbccdd/assets/base.js")).toBe(false);
+});
+
+test("loads archived Twitter Lite chunks from the local asset route", () => {
+	const manifest = 'window.webpackChunkManifest={"bundle.HomeTimeline":"bundle.HomeTimeline.aabbccdd.js"};';
+	const loader = 'loader.p="https://abs-0.twimg.com/responsive-web/web/ltr/";';
+	const other = 'const image="https://abs-0.twimg.com/responsive-web/web/ltr/image.png";';
+	expect(patchClientRuntime(manifest + loader + other)).toBe(manifest + 'loader.p="/abs/responsive-web/web/ltr/";' + other);
+	expect(patchClientRuntime("loader.p='https://ma-0.twimg.com/twitter-assets/responsive-web/web/rtl/';"))
+		.toBe("loader.p='/abs/twitter-assets/responsive-web/web/rtl/';");
 });
 
 test("lists switches from the selected build with Xitter's defaults", () => {

@@ -5,6 +5,8 @@ import { RateLimitError, limitedResponse } from "./ratelimit";
 import { ChatError, chatHandlers } from "./chat";
 import { delegationHandlers } from "./delegation";
 import { automationHandlers } from "./automation";
+import { GrokError, grokHandlers } from "./grok";
+import { premiumHub, userClaims } from "./user-claims";
 import { analyticsHandlers } from "./analytics";
 import { bookmarkFolderHandlers } from "./bookmark-folders";
 import { communityHandlers } from "./communities";
@@ -920,6 +922,7 @@ const handlers: Record<string, Handler> = {
 	UserSportsProfile: () => ({ data: {} }),
 	isEligibleForVoButtonUpsellQuery: () => ({ data: {} }),
 	usePremiumPaywallOnLoadMutation: () => ({ data: {} }),
+	PremiumHubQuery: premiumHub,
 	ViewerBadgeCounts: async (v) => ({
 		data: {
 			viewer_v2: {
@@ -1206,9 +1209,10 @@ Object.assign(handlers, {
 	},
 	ViewerTeams: () => ({ data: { viewer: { teams: { act_as: [] } } } }),
 	ViewerEmailSettings: () => ({ data: { viewer: { user: { notifications_email_notifications: {} } } } }),
-	GetUserClaims: () => ({ data: { viewer_v2: { claims: [] } } }),
+	GetUserClaims: (v) => ({ data: { viewer_v2: { claims: userClaims(v) } } }),
 } satisfies Record<string, Handler>);
 Object.assign(handlers, automationHandlers);
+Object.assign(handlers, grokHandlers);
 
 // own names only: "constructor" is in every object, and called it hands the viewer back
 export const knownOperation = (name: string) => Object.hasOwn(handlers, name);
@@ -1224,6 +1228,7 @@ export async function runOperation(name: string, viewer: Viewer, vars: Vars): Pr
 		if (e instanceof RateLimitError) return limitedResponse(e.hit);
 		// the chat app reads these as they are
 		if (e instanceof ChatError) return Response.json({ errors: [{ message: e.message, code: e.code }], data: {} });
+		if (e instanceof GrokError) return Response.json({ errors: [{ message: `Error: ${e.message}`, code: 403, extensions: { code: 403 } }], data: {} });
 		// the main client takes the code from extensions and shows the message
 		// after its first ": ", as in X's "_Missing: No status found with that ID."
 		if (e instanceof PostError || e instanceof ReplyControlError || e instanceof articles.ArticleError) {

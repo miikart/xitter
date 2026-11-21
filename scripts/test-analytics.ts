@@ -24,11 +24,13 @@ async function session(username: string) {
 		(await fetch(`${origin}/i/api/graphql/q/${op}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ variables }) })).json();
 	const get = async (op: string, variables: object) =>
 		(await fetch(`${origin}/i/api/graphql/q/${op}?variables=${encodeURIComponent(JSON.stringify(variables))}`, { headers })).json();
-	return { gql, get };
+	return { gql, get, headers };
 }
 
 const a = await session(nameA);
 const b = await session(nameB);
+const studio = await fetch(`${origin}/i/jf/creators/studio`, { headers: a.headers, redirect: "manual" });
+check(studio.status === 302 && studio.headers.get("location") === "/i/account_analytics", "Creator Studio opens account analytics");
 const now = Date.now();
 const range = { from_time: new Date(now - 3_600_000).toISOString(), to_time: new Date(now + 3_600_000).toISOString(), requested_metrics: ["Impressions", "Likes", "Replies", "Retweets", "Bookmark", "Engagements"] };
 

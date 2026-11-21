@@ -4,6 +4,7 @@
 // use GraphQL; this runs the same handler and reshapes its result, so the
 // ranking, filters and cursors are the ones graphql.ts already has.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Viewer } from "./auth";
 import { eggAvatar, usesLegacyVerification } from "./model";
 import { PostError } from "./posts";
@@ -11,6 +12,10 @@ import { callOperation } from "./graphql";
 import { MOMENT_CARD_NAME } from "./moments";
 
 type Obj = Record<string, any>;
+
+const kitkat = new AsyncLocalStorage<boolean>();
+export const isKitKatClient = (ua: string) => /^TwitterAndroid\/4\.1\.9(?:\s|$)/i.test(ua);
+export const withKitKat = <T>(ua: string, fn: () => T): T => kitkat.run(isKitKatClient(ua), fn);
 
 // the GraphQL user record, as the REST users of globalObjects look
 export function restUser(u: Obj): Obj {
@@ -176,8 +181,11 @@ export function restStatus(result: Obj | undefined): Obj | undefined {
 	if (!id) return undefined;
 	const embed = (tid: string): Obj => {
 		const { retweeted_status_id_str, quoted_status_id_str, ...t } = tweets[tid];
+		// 4.1.9 drops tweets with empty text when saving them to its local database.
+		const photoOnly = kitkat.getStore() && !(t.full_text ?? t.text) && t.entities?.media?.some((media: Obj) => media.type === "photo");
 		return {
 			...t,
+			...(photoOnly ? { full_text: "\u200b", text: "\u200b" } : {}),
 			user: users[t.user_id_str],
 			...(retweeted_status_id_str && tweets[retweeted_status_id_str] ? { retweeted_status: embed(retweeted_status_id_str) } : {}),
 			...(quoted_status_id_str && tweets[quoted_status_id_str] ? { quoted_status_id_str, quoted_status: embed(quoted_status_id_str) } : {}),

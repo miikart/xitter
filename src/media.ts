@@ -18,6 +18,7 @@ import { isStaffRequest, staffViewer } from "./staff-access";
 import { circleSeen } from "./circles";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
+import { hit, limitedResponse } from "./ratelimit";
 import { settings } from "./settings";
 import { gifProxy } from "./gifs";
 import { compressUpload, encodeAvatar, profileVariant } from "./media-compress";
@@ -492,6 +493,22 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 
 export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promise<Response> {
 	const { fields, file } = await params(req, url);
+	const classic = fields.command === undefined && req.method === "POST" && url.pathname === "/1.1/media/upload.json";
+	const phase = classic ? req.headers.get("x-sessionphase") : null;
+	const multipart = classic && phase === null && req.headers.get("content-type")?.startsWith("multipart/form-data");
+	if ((multipart || phase === "INIT") && !viewer.role) {
+		const limit = hit("upload", viewer.id);
+		if (!limit.ok) return limitedResponse(limit);
+	}
+	if (phase === "INIT") {
+		fields.command = phase;
+		fields.total_bytes = req.headers.get("x-totalbytes") ?? "";
+		fields.media_type = req.headers.get("x-media-type") ?? "";
+	} else if (phase === "APPEND" || phase === "FINALIZE") {
+		fields.command = phase;
+		fields.media_id = req.headers.get("x-mediaid") ?? "";
+		if (phase === "APPEND") fields.segment_index = req.headers.get("x-segmentindex") ?? "-1";
+	}
 	const id = fields.media_id;
 
 	switch (fields.command) {
@@ -632,6 +649,23 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 			return mediaJson(id, { processing_info: { state: "succeeded", progress_percent: 100 } });
 		}
 	}
+	if (multipart) {
+		if (!file?.length || file.length > MAX_GIF) return uploadError("File is too large or empty.");
+		if (activeUploadCount(viewer.id) >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
+		const newMedia = newId();
+		try {
+			mkdirSync(pendingDir(newMedia), { recursive: true });
+			writeFileSync(segmentFile(newMedia, 0), file);
+			return await finalize(newMedia, {
+				userId: viewer.id, total: file.length, category: "tweet_image", video: false,
+				chunks: new Map([[0, file.length]]), received: file.length, started: Date.now(),
+			});
+		} catch (e) {
+			rmSync(pendingDir(newMedia), { recursive: true, force: true });
+			rmSync(fileOf(newMedia), { force: true });
+			throw e;
+		}
+	}
 	return uploadError("Unknown command.");
 }
 
@@ -716,7 +750,7 @@ function tagOf(served: Served, body: Blob, cache: string): { etag?: string } {
 const unchanged = (req: Request, headers: Record<string, string>) => !!headers.etag && req.headers.get("if-none-match") === headers.etag;
 
 const AVATAR_SIDES = new Map([["mini", 24], ["normal", 48], ["bigger", 73], ["x96", 96], ["reasonably_small", 128], ["200x200", 200], ["400x400", AVATAR_SIDE]]);
-const PROFILE_IMAGE_PATH = /^\/profile_images\/(\d{1,19})\/(?:[\w.%~-]{1,180}?_(mini|normal|bigger|x96|reasonably_small|200x200|400x400)|avatar)\.(jpe?g|png|gif|webp)$/i;
+const PROFILE_IMAGE_PATH = /^\/profile_images\/(\d{1,19})\/(?:[\w.%~-]{1,180}?_(mini|normal|bigger|x96|reasonably_small|200x200|400x400)|avatar(?:-http)?)\.(jpe?g|png|gif|webp)$/i;
 const BANNER_WIDTHS = new Map([["300x100", 300], ["600x200", 600], ["1080x360", 1080], ["1500x500", 1500]]);
 
 function profileSize(served: Served, bannerPath: boolean, extension: string | undefined, size: string | null): [number, number] | undefined {

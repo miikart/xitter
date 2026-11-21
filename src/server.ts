@@ -24,11 +24,12 @@ import { menuLinks } from "./tidy";
 import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { sweepChatUploads } from "./chat-media";
-import { browserBuild, momentMakerBuild } from "./build";
+import { browserBuild, clientKnowsSwitch, momentMakerBuild } from "./build";
 import { frontendRoute } from "./client-preference";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
+import { isKitKatClient, withKitKat } from "./rest-timeline";
 import { bootScript, shell } from "./shell";
 import { platformSource } from "./platforms";
 import { badgeImage, expireSanctions } from "./moderation";
@@ -44,7 +45,8 @@ import { startScheduler } from "./scheduled";
 import { federationRoute, startFederation } from "./federation-routes";
 import { acceptTicket, superadminHomeRoute } from "./superadmin";
 import { gifProxy } from "./gifs";
-import { accountIndexRoute } from "./account-page";
+import { accountIndexRoute, accountPage } from "./account-page";
+import { grokReady } from "./grok";
 import { gifSettingsRoute } from "./gif-settings";
 import { classicDetailRoute, postCounts } from "./classic-detail";
 import { circleRoute } from "./circles";
@@ -63,7 +65,7 @@ import { oauth1Route } from "./oauth1";
 import { apiDocsPage } from "./api-docs";
 import { hashflagAsset } from "./hashflags";
 import { startMailDigests } from "./mail-digest";
-import { SERVICE_WORKER, startPush } from "./push";
+import { ANDROID_PUSH_POLL, SERVICE_WORKER, startPush } from "./push";
 import { BRAND_NAME, brandIcons, manifest, originalBrand } from "./pwa";
 import { emailRoute } from "./email-address";
 import { embedImage, linkPreview, oembed } from "./embeds";
@@ -235,7 +237,8 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	if (!viewer && url.pathname.endsWith("/1.1/guest/activate.json")) return Response.json({ guest_token: "1" });
 	if (!viewer) return apiError(401, 32, "Could not authenticate you.");
 	const sessionViewer = viewer;
-	const source = await platformSource(req);
+	const legacyOAuth = signedByOAuth1(req);
+	const source = await platformSource(req, legacyOAuth);
 	if (source === null) return apiError(401, 32, "Invalid or revoked client token.");
 	viewer = { ...viewer, postSource: source };
 	const path = url.pathname.replace(/^\/i\/(jf)?api/, "");
@@ -243,7 +246,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	const gql = parts.indexOf("graphql");
 	const operation = gql >= 0 ? parts[parts.length - 1] : undefined;
 	if (req.method === "POST" && path === "/1.1/graphql/app_context.json") return new Response(null, { status: 204 });
-	if ((req.method !== "GET" || operation) && !signedByOAuth1(req) && req.headers.get("x-csrf-token") !== viewer.csrf)
+	if ((req.method !== "GET" || operation) && !legacyOAuth && req.headers.get("x-csrf-token") !== viewer.csrf)
 		return apiError(403, 353, "This request requires a matching csrf cookie and header.");
 	if (req.method === "GET" && operation && isMutation(operation)) return apiError(405, 144, "Use POST for this operation.");
 	// a delegate switched into another account (delegation.ts); the client sends
@@ -309,7 +312,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	}
 	const ua = req.headers.get("user-agent") ?? "";
 	const classicWeb = !/^Twitter/i.test(ua) && browserBuild(sessionViewer, req.headers.get("x-xitter-build"))?.build.featureSwitch.flat === true;
-	const rest = await withClassicVerification(classicWeb, () => withEggs(ua, () => restRoute(req.method, path, viewer, req)));
+	const rest = await withKitKat(ua, () => withClassicVerification(classicWeb, () => withEggs(ua, () => restRoute(req.method, path, viewer, req))));
 	if (rest) return legacyIds(req, rest, viewer);
 
 	const key = `${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`;
@@ -324,11 +327,22 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 // text: ids do not fit a double. Only they get it, since a browser would round them.
 const LEGACY_CLIENT = /^Twitter(?:Android|-iPhone|-iPad|-iPod)\b|^Twitter for (?:iPhone|iPad|Android)\b/i;
 async function legacyIds(req: Request, res: Response, viewer: Viewer | undefined): Promise<Response> {
-	if (!LEGACY_CLIENT.test(req.headers.get("user-agent") ?? "") || !/json/.test(res.headers.get("content-type") ?? "")) return res;
+	const ua = req.headers.get("user-agent") ?? "";
+	if (!LEGACY_CLIENT.test(ua) || !/json/.test(res.headers.get("content-type") ?? "")) return res;
 	let body = (await res.text()).replace(/(?<!"id":\d+,)"id_str":"(\d+)"/g, '"id":$1,"id_str":"$1"');
 	// links point back at the address the app used: it cannot reach, or trust, the public https one
 	const host = req.headers.get("host");
-	if (host) body = body.replaceAll(PUBLIC_ORIGIN, `${req.headers.get("x-forwarded-proto") === "https" ? "https" : "http"}://${host}`);
+	const scheme = req.headers.get("x-forwarded-proto") === "https" ? "https" : "http";
+	if (host) {
+		const origin = `${scheme}://${host}`;
+		body = body.replaceAll(PUBLIC_ORIGIN, origin);
+		// 4.1.9 compares avatar paths when updating users, so a scheme change alone leaves the old URL in its database.
+		if (scheme === "http" && isKitKatClient(ua)) {
+			body = body.replace(/("profile_image_url(?:_https)?":")([^"]+)"/g, (match, field, image: string) =>
+				image.startsWith(`${origin}/profile_images/`) ? `${field}${image.replace(/\/avatar_normal\.(jpe?g|png|gif|webp)$/i, "/avatar-http_normal.$1")}"` : match,
+			);
+		}
+	}
 	const headers = new Headers(res.headers);
 	headers.delete("content-length");
 	// the app loads pictures without signing in
@@ -654,6 +668,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (API_PREFIX.test(p) || req.method !== "GET") {
 		// the event stream must outlive the default idle timeout
 		if (p.endsWith("/live_pipeline/events")) server.timeout(req, 0);
+		if (req.method === "GET" && (p === ANDROID_PUSH_POLL || p === "/i/api" + ANDROID_PUSH_POLL)) server.timeout(req, 30);
+		if (p === "/2/grok/add_response.json" || p === "/i/api/2/grok/add_response.json") server.timeout(req, 90);
 		return serveApi(req, url, viewer);
 	}
 
@@ -666,6 +682,17 @@ async function route(req: Request): Promise<Response | undefined> {
 	// expects the current flow; guests get the plain form instead of its
 	// signed-out page, whose Log in button cannot complete
 	const activeBuild = browserBuild(viewer);
+	if (viewer && (p === "/i/jf/creators/studio" || p === "/i/jf/creators/studio/")) {
+		if (clientKnowsSwitch(activeBuild?.build, "subscriptions_feature_account_analytics"))
+			return Response.redirect("/i/account_analytics", 302);
+		return accountPage({ req, viewer, title: "Creator Studio", body: "<p>Account analytics are available in the current web client.</p>", back: { href: "/home", label: "Home" } });
+	}
+	if (viewer && /^\/i\/grok(?:\/|$)/.test(p)) {
+		if (!grokReady())
+			return accountPage({ req, viewer, title: "Grok", body: "<p>Grok is unavailable on this instance.</p>", status: 503, back: { href: "/home", label: "Home" } });
+		if (!clientKnowsSwitch(activeBuild?.build, "subscriptions_inapp_grok"))
+			return accountPage({ req, viewer, title: "Grok", body: "<p>Grok is available in the current web client.</p>", back: { href: "/home", label: "Home" } });
+	}
 	if (!viewer && p === "/" && activeBuild?.build.legacy_login) return Response.redirect("/login", 302);
 	// signed out: X's own home page with its sign-in form, and the dialog
 	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);

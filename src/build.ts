@@ -26,6 +26,10 @@ export const BUILD_FILE = join(CLIENT_DIR, "build.json");
 export const RUNTIME_FILE = join(CLIENT_DIR, "runtime.js");
 
 export type LoadedBuild = { build: Build; runtime: string };
+
+export function clientKnowsSwitch(build: Build | undefined, name: string): boolean {
+	return !!build && (Object.hasOwn(build.featureSwitch.config, name) || Object.hasOwn(build.featureSwitch.defaultConfig, name));
+}
 let cached: LoadedBuild | undefined;
 const namedCache = new Map<string, LoadedBuild>();
 

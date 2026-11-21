@@ -8,6 +8,7 @@ import { sql } from "./db";
 import { isOrganizationSql } from "./users";
 import { type Feature, feature, settings } from "./settings";
 import { gifProviders } from "./gifs";
+import { grokReady } from "./grok";
 
 const links = (...hrefs: string[]) => hrefs.map((h) => `a[href="${h}"],a[href^="${h}?"]`);
 const ids = (...testIds: string[]) => testIds.map((t) => `[data-testid="${t}"]`);
@@ -54,8 +55,9 @@ const ALWAYS = [
 ];
 
 export function hideCss(): string {
-	const off = (Object.keys(BY_FEATURE) as Feature[]).filter((f) => !feature(f)).flatMap((f) => BY_FEATURE[f]);
+	const off = (Object.keys(BY_FEATURE) as Feature[]).filter((f) => f === "grok" ? !grokReady() : !feature(f)).flatMap((f) => BY_FEATURE[f]);
 	return `${[...ALWAYS, ...off].join(",")}{display:none!important}
+[data-testid="xitter-sidebar-card"]:is(:empty,:has(>div:only-child:empty),:has(>[data-testid="emptyState"]:only-child)){display:none}
 html[data-xitter-full] [data-testid="primaryColumn"] > :not(#xitter-pane){display:none!important}
 #xitter-announcement{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;background:var(--xt-accent-fill,var(--xt-accent,#1d9bf0));color:#fff;font:15px TwitterChirp,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 #xitter-announcement .xa-body{flex:1;min-width:0;display:grid;gap:10px}
@@ -206,6 +208,13 @@ export const FRESH_SCRIPT = `(function(){
 	};
 	var push=history.pushState;
 	history.pushState=function(s,t,u){
+		if(u){
+			var route=new URL(u,location.href);
+			if(route.origin===location.origin&&route.pathname==="/i/jf/creators/studio"){
+				location.assign(route.href);
+				return;
+			}
+		}
 		if(u&&stale.length&&due(u)&&!/\\/(compose\\/post$|i\\/flow|i\\/bookmarks\\/add)/.test(String(u))){
 			stale=[];
 			location.assign(u);

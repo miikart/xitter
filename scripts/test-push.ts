@@ -8,6 +8,7 @@
 
 import { createDecipheriv, createECDH, hkdfSync, randomBytes } from "node:crypto";
 import { sql } from "../src/db";
+import { loadSettings, settings } from "../src/settings";
 
 const origin = `http://localhost:${process.env.PORT ?? 3000}`;
 const [subName, otherName, password] = process.argv.slice(2);
@@ -24,7 +25,9 @@ async function session(username: string) {
 	const form = (path: string, body: Record<string, string>) => fetch(`${origin}/i/api${path}`, { method: "POST", headers, body: new URLSearchParams(body) });
 	const gql = async (op: string, variables: object) =>
 		(await fetch(`${origin}/i/api/graphql/q/${op}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ variables }) })).json();
-	return { post, form, gql };
+	const poll = async (params: Record<string, string>, userAgent = "TwitterAndroid/6.17.0 MiikartPush/1") =>
+		(await fetch(`${origin}/1.1/xitter/push/poll.json?${new URLSearchParams(params)}`, { headers: { ...headers, "user-agent": userAgent } })).json();
+	return { post, form, gql, poll };
 }
 let failures = 0;
 function check(label: string, ok: boolean, detail: unknown = "") {
@@ -85,24 +88,48 @@ try {
 	const moneySaved = await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { money: "off" } } });
 	check("the money switch is saved", moneySaved.push_settings.money === "off", moneySaved.push_settings);
 	check("and keeps the subscription", (await sql`select 1 from push_subscriptions where endpoint = ${endpoint} and user_id = ${subId}::bigint`).length === 1);
-	const saved = await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { mentions: "off", nonsense: "on" } } });
+	const saved = await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { mentions: "off", retweets: "off", nonsense: "on" } } });
 	check("switches are saved", saved.push_settings.mentions === "off" && !("nonsense" in saved.push_settings), saved.push_settings);
 
 	await sql`update push_subscriptions set last_pushed_at = now() where endpoint = ${endpoint}`;
+	const bootstrap = await sub.poll({ bootstrap: "1" });
+	check("Android notification polling starts with no old events", bootstrap.events?.length === 0 && typeof bootstrap.dm_cursor === "string" && Number.isSafeInteger(bootstrap.activity_cursor));
 	await other.form("/1.1/friendships/create.json", { user_id: subId });
+	const androidPoll = sub.poll({ dm_cursor: bootstrap.dm_cursor, activity_cursor: String(bootstrap.activity_cursor) });
 	check("a new follower is pushed", await waitFor(1));
 	const first = received[0];
 	check("signed with VAPID", /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/.test(first?.headers.get("authorization") ?? ""), first?.headers.get("authorization")?.slice(0, 20));
 	check("and encrypted for the browser", first?.headers.get("content-encoding") === "aes128gcm");
 	const msg = first && decrypt(first.body);
 	check("which reads the push", /followed you$/.test(msg?.body ?? "") && msg?.url === `/${otherName}`, msg);
+	const android = await androidPoll;
+	check("Android polling returns the follow alert and advances its cursor", android.events?.some((event: any) => event.kind === "follow" && /followed you$/.test(event.body)) &&
+		android.activity_cursor > bootstrap.activity_cursor);
 
-	// a reply, with mentions switched off: nothing
+	// browser switches do not change which events the Android app receives
 	const [post] = await sql`insert into posts (id, user_id, text, conversation_id) values (${String(BigInt(Date.now()) << 22n)}::bigint, ${subId}::bigint, 'push test', ${String(BigInt(Date.now()) << 22n)}::bigint) returning id::text`;
 	made.push(post.id);
 	const reply = (await other.gql("CreateTweet", { tweet_text: "a reply", reply: { in_reply_to_tweet_id: post.id } })).data.create_tweet.tweet_results.result.rest_id;
 	made.push(reply);
+	const mention = (await other.gql("CreateTweet", { tweet_text: `hello @${subName}` })).data.create_tweet.tweet_results.result.rest_id;
+	made.push(mention);
+	const repost = (await other.gql("CreateRetweet", { tweet_id: post.id })).data.create_retweet.retweet_results.result.rest_id;
+	made.push(repost);
+	const cursors = { dm_cursor: android.dm_cursor, activity_cursor: String(android.activity_cursor) };
+	const activityPoll = sub.poll(cursors);
+	const modernPoll = sub.poll(cursors, "TwitterAndroid/10.0.0-release.0 MiikartPush/1");
 	check("a switched-off kind isn't pushed", !(await waitFor(2, 20)), received.length);
+	const activity = await activityPoll;
+	await loadSettings();
+	const expectedTitle = settings().original_branding_for_members ? "Twitter" : settings().instance_name;
+	for (const [kind, target] of [["reply", reply], ["mention", mention], ["repost", post.id]]) {
+		check(`Android gets a branded ${kind} alert linked to its post`, activity.events?.some((event: any) =>
+			event.kind === kind && event.title === expectedTitle && event.url === `twitter://status?id=${target}`));
+	}
+	const modern = await modernPoll;
+	const modernTitle = settings().original_branding_for_members ? "X" : settings().instance_name;
+	check("Android 10.0 app build gets the corresponding notification title", modern.events?.some((event: any) =>
+		event.kind === "mention" && event.title === modernTitle && event.url === `twitter://status?id=${mention}`));
 
 	answer = 410;
 	await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { mentions: "on" } } });

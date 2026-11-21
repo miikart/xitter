@@ -10,12 +10,14 @@
 
 import { createECDH, createPrivateKey, generateKeyPairSync, hkdfSync, randomBytes, sign, createCipheriv } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
+import { browserBuild } from "./build";
 import { sql } from "./db";
-import { newId } from "./ids";
+import { isId, newId } from "./ids";
 import { mailFrom } from "./mail";
 import { type PushItem, pushItems, unreadCount } from "./notifications";
-import { OFFLINE_PAGE } from "./pwa";
+import { type Brand, BRAND_NAME, OFFLINE_PAGE, brandIcons, originalBrand } from "./pwa";
 import { settings } from "./settings";
 
 const KEY_FILE = "data/push-vapid.json";
@@ -79,9 +81,17 @@ function vapidHeader(endpoint: string): string {
 
 type Subscription = { id: string; user_id: string; endpoint: string; p256dh: string; auth: string; settings: Record<string, string>; last_pushed_at: Date };
 
+export function pushAppearance(brand: Brand | null) {
+	return {
+		title: brand ? BRAND_NAME[brand] : settings().instance_name,
+		icon: new URL(brandIcons(brand).app, PUBLIC_ORIGIN).href,
+		badge: brand ? undefined : new URL("/public/notification-badge.png", PUBLIC_ORIGIN).href,
+	};
+}
+
 // Sends one message; a subscription the push service says is gone is dropped.
-export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh" | "auth">, message: { title: string; body: string; url: string; tag?: string; count?: number }): Promise<boolean> {
-	const body = encryptPayload(Buffer.from(JSON.stringify({ ...message, icon: `${PUBLIC_ORIGIN}/public/app-icon.png`, badge: `${PUBLIC_ORIGIN}/public/notification-badge.png` })), Buffer.from(sub.p256dh, "base64url"), Buffer.from(sub.auth, "base64url"));
+export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh" | "auth">, message: ReturnType<typeof pushAppearance> & { body: string; url: string; tag?: string; count?: number }): Promise<boolean> {
+	const body = encryptPayload(Buffer.from(JSON.stringify(message)), Buffer.from(sub.p256dh, "base64url"), Buffer.from(sub.auth, "base64url"));
 	const r = await fetch(sub.endpoint, {
 		method: "POST",
 		headers: { authorization: vapidHeader(sub.endpoint), "content-encoding": "aes128gcm", "content-type": "application/octet-stream", ttl: "86400", urgency: "normal" },
@@ -167,6 +177,47 @@ export async function pushSettingsRoute(viewerId: string, action: string, body: 
 	return Response.json(settingsReply(sub?.settings ?? {}));
 }
 
+export const ANDROID_PUSH_POLL = "/1.1/xitter/push/poll.json";
+
+export async function androidPushPoll(viewerId: string, req: Request): Promise<Response> {
+	const params = new URL(req.url).searchParams;
+	const dmCursor = params.get("dm_cursor");
+	const activityParam = params.get("activity_cursor");
+	const activityCursor = Number(activityParam);
+	const respond = (dm: string, activity: number, events: { key: string; kind: string; title: string; body: string; url: string }[]) =>
+		Response.json({ dm_cursor: dm, activity_cursor: activity, events }, { headers: { "cache-control": "no-store" } });
+
+	if (params.get("bootstrap") === "1") {
+		const now = Date.now();
+		const [row] = await sql`select coalesce(max(id), 0)::text as id from classic_dms where recipient_id = ${viewerId}::bigint`;
+		return respond(row.id, now, []);
+	}
+	if (!isId(dmCursor) || !activityParam || !/^\d{1,16}$/.test(activityParam) || !Number.isSafeInteger(activityCursor) || activityCursor > Date.now()) {
+		return Response.json({ errors: [{ code: 44, message: "Invalid notification cursor." }] }, { status: 400, headers: { "cache-control": "no-store" } });
+	}
+	await delay(10_000, undefined, { signal: req.signal }).catch(() => undefined);
+	if (req.signal.aborted) return new Response(null, { status: 204 });
+
+	const [activity, dms] = await Promise.all([
+		pushItems(viewerId, activityCursor),
+		sql`select d.id::text, coalesce(nullif(u.name, ''), u.screen_name) as sender
+			from classic_dms d join users u on u.id = d.sender_id
+			where d.recipient_id = ${viewerId}::bigint and d.id > ${dmCursor}::bigint and not d.recipient_deleted
+			and not exists (select 1 from blocks b where b.blocker_id = ${viewerId}::bigint and b.blocked_id = d.sender_id)
+			order by d.id limit 20`,
+	]);
+	const { original_branding_for_members, instance_name } = settings();
+	const majorVersion = /^TwitterAndroid\/(\d+)\.\d+\.\d+(?=[\s-]|$)/i.exec(req.headers.get("user-agent") ?? "")?.[1];
+	const brand = Number(majorVersion ?? 0) >= 10 ? "x" : "twitter";
+	const title = original_branding_for_members ? BRAND_NAME[brand] : instance_name;
+	const events = activity.map((item) => {
+		const postId = /\/status\/(\d+)$/.exec(item.url)?.[1];
+		return { key: `${item.key}-${item.at}`, kind: item.kind, title, body: item.text, url: postId ? `twitter://status?id=${postId}` : "twitter://mentions" };
+	});
+	for (const dm of dms) events.push({ key: `dm-${dm.id}`, kind: "dm", title, body: `${dm.sender} sent you a message`, url: "twitter://messages" });
+	return respond(dms.at(-1)?.id ?? dmCursor, Math.max(activityCursor, ...activity.map((item) => item.at)), events);
+}
+
 // More than this at once becomes one "N new notifications" push.
 const BURST = 3;
 
@@ -177,7 +228,9 @@ export async function pushDue(): Promise<number> {
 	if (pushing) return 0;
 	pushing = true;
 	try {
-		const subs = (await sql`select id::text, user_id::text, endpoint, p256dh, auth, settings, last_pushed_at from push_subscriptions`) as Subscription[];
+		const subs = (await sql`select s.id::text, s.user_id::text, s.endpoint, s.p256dh, s.auth, s.settings, s.last_pushed_at,
+			u.preferences->>'client_build' as client_build
+			from push_subscriptions s join users u on u.id = s.user_id`) as (Subscription & { client_build: string | null })[];
 		let sent = 0;
 		// an account's notifications are worked out once for all its browsers,
 		// from the one pushed to longest ago (items newest first, so each
@@ -192,11 +245,12 @@ export async function pushDue(): Promise<number> {
 				const all = [...items, ...messages].sort((a, b) => a.at - b.at);
 				if (!all.length) continue;
 				await sql`update push_subscriptions set last_pushed_at = ${new Date(Math.max(...all.map((i) => i.at)) + 1)} where id = ${sub.id}::bigint`;
-				const name = settings().instance_name;
+				const brand = originalBrand(true, browserBuild({ clientBuild: sub.client_build })?.build);
+				const appearance = pushAppearance(brand);
 				// for the installed app's icon badge
 				const count = await unreadCount(sub.user_id);
-				const out = all.length > BURST ? [{ title: name, body: `${all.length} new notifications`, url: "/notifications", tag: "summary", count }] : all.map((i) => ({ title: name, body: i.text, url: i.url, tag: i.key, count }));
-				for (const m of out) if (await pushTo(sub, m)) sent++;
+				const out = all.length > BURST ? [{ body: `${all.length} new notifications`, url: "/notifications", tag: "summary", count }] : all.map((i) => ({ body: i.text, url: i.url, tag: i.key, count }));
+				for (const m of out) if (await pushTo(sub, { ...appearance, ...m })) sent++;
 			}
 		}
 		return sent;
